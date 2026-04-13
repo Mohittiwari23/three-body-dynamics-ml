@@ -1,0 +1,86 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Build / packaging ─────────────────────────────────────────────────────────
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# ── PyCharm / JetBrains ───────────────────────────────────────────────────────
+.idea/
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── ─────────────────────────────────────────────────────────────────────────
+# DATA  —  trajectory files are large and regenerable via dataset_generator3.py
+# ─────────────────────────────────────────────────────────────────────────────
+data/
+*.npz
+*.npy
+*.csv
+*.h5
+*.hdf5
+*.parquet
+*.pkl
+*.pickle
+
+# ── Trained models ────────────────────────────────────────────────────────────
+# Regenerable by running experiment_a.py / experiment_b.py
+outputs/exp_a/models/
+outputs/exp_b/models/
+*.joblib
+*.pt
+*.pth
+*.onnx
+
+# ── Generated plots ───────────────────────────────────────────────────────────
+# Regenerable outputs — commit only source code, not artefacts
+outputs/exp_a/plots/
+outputs/exp_b/plots/
+
+# Keep the outputs folder structure in git (empty dirs need a placeholder)
+!outputs/exp_a/.gitkeep
+!outputs/exp_b/.gitkeep
+!outputs/exp_a/models/.gitkeep
+!outputs/exp_b/models/.gitkeep
+!outputs/exp_a/plots/.gitkeep
+!outputs/exp_b/plots/.gitkeep
+
+# ── results CSVs — commit these (small, useful for tracking experiment history)
+# outputs/exp_a/results.csv  ← tracked
+# outputs/exp_b/results.csv  ← tracked
+
+# ── Animation / video exports ─────────────────────────────────────────────────
+*.mp4
+*.gif
+*.avi
+
+# ── OS noise ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+file_list.txt
