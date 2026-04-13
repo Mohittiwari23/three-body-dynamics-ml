@@ -1,0 +1,2 @@
+[console_scripts]
+orbital-sim = main:main
