@@ -5,7 +5,6 @@
 ![Phase](https://img.shields.io/badge/phase-3%20%E2%80%94%20three--body%20%2B%20ML-blueviolet)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Status](https://img.shields.io/badge/status-active-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
 
