@@ -93,10 +93,14 @@ def _com_3body(m1, m2, m3, r12, r3_sep, v1, v2, v3_angle, v3_mag):
     com = (m1*r1 + m2*r2 + m3*r3) / M
     r1 -= com; r2 -= com; r3 -= com
 
-    # Inner binary velocities: circular orbit
+    # --- ADD eccentricity ---
+    e_inner = np.random.uniform(0.0, 0.8)
+
     v_circ_12 = np.sqrt(G * M12 / r12)
-    v1_lab = np.array([0.0,  v_circ_12 * m2/M12])
-    v2_lab = np.array([0.0, -v_circ_12 * m1/M12])
+    v_factor = np.sqrt((1 + e_inner) / (1 - e_inner + 1e-8))
+
+    v1_lab = np.array([0.0, v_circ_12 * v_factor * m2 / M12])
+    v2_lab = np.array([0.0, -v_circ_12 * v_factor * m1 / M12])
 
     # Body 3 velocity: tangential to position vector, scaled
     v3_dir = np.array([-np.sin(v3_angle), np.cos(v3_angle)])
@@ -143,7 +147,7 @@ def _sample_asymmetric(rng):
     r3_sep = r12 * float(rng.uniform(1.5, 8.0))
 
     v_circ = np.sqrt(G * M_total / r3_sep)
-    v3_mag = v_circ * float(rng.uniform(0.3, 1.6)) * rng.uniform(0.9, 1.2)
+    v3_mag = v_circ * float(rng.uniform(0.5, 2.0)) * rng.uniform(0.9, 1.2)
     v3_angle = float(rng.uniform(0, 2*np.pi))
     return m1, m2, m3, r12, r3_sep, v3_mag, v3_angle
 
@@ -160,11 +164,31 @@ def _sample_near_equal(rng):
     r3_sep = r12 * float(rng.uniform(1.2, 5.0))
 
     v_circ = np.sqrt(G * M_total / r3_sep)
-    v3_mag = v_circ * float(rng.uniform(0.5, 1.5)) * rng.uniform(0.9, 1.2)
+    v3_mag = v_circ * float(rng.uniform(0.8, 2.2)) * rng.uniform(0.9, 1.2)
     v3_angle = float(rng.uniform(0, 2*np.pi))
     return m1, m2, m3, r12, r3_sep, v3_mag, v3_angle
 
+def _sample_scatter(rng):
+    """Strong interaction / slingshot regime"""
 
+    M_total = float(np.exp(rng.uniform(np.log(3), np.log(50))))
+    m1 = M_total * rng.uniform(0.3, 0.5)
+    m2 = M_total * rng.uniform(0.3, 0.5)
+    m3 = M_total - m1 - m2
+
+    r12 = float(rng.uniform(0.5, 3.0))
+
+    # CRITICAL: very close approach
+    r3_sep = r12 * float(rng.uniform(0.8, 2.5))
+
+    v_circ = np.sqrt(G * M_total / r3_sep)
+
+    # FAST → slingshot
+    v3_mag = v_circ * float(rng.uniform(1.2, 3.0))
+
+    v3_angle = float(rng.uniform(0, 2*np.pi))
+
+    return m1, m2, m3, r12, r3_sep, v3_mag, v3_angle
 # ---------------------------------------------------------------------------
 # Main generator
 # ---------------------------------------------------------------------------
@@ -185,9 +209,10 @@ def generate(
 
     # Regime assignment
     regime_counts = {
-        "hierarchical": int(n_samples * 0.10),
-        "asymmetric": int(n_samples * 0.35),
-        "near_equal": n_samples - int(n_samples * 0.10) - int(n_samples * 0.35),
+        "hierarchical": int(n_samples * 0.20),
+        "asymmetric": int(n_samples * 0.25),
+        "near_equal": int(n_samples * 0.25),
+        "scatter": n_samples - int(n_samples * 0.20) - int(n_samples * 0.25) - int(n_samples * 0.25),
     }
     regimes = []
     for r, cnt in regime_counts.items():
@@ -197,8 +222,9 @@ def generate(
 
     samplers = {
         "hierarchical": _sample_hierarchical,
-        "asymmetric":   _sample_asymmetric,
-        "near_equal":   _sample_near_equal,
+        "asymmetric": _sample_asymmetric,
+        "near_equal": _sample_near_equal,
+        "scatter": _sample_scatter,
     }
 
     rows = []
@@ -228,7 +254,7 @@ def generate(
         T_inner = 2 * np.pi * np.sqrt(r12 ** 3 / (G * M12))
 
         min_time = 10.0  # minimum physical time
-        n_steps_dyn = max(3000, int(5 * T_inner / dt), int(min_time / dt))
+        n_steps_dyn = max(3000, int(20 * T_inner / dt), int(min_time / dt))
         n_steps_dyn = min(n_steps_dyn, 20000)
 
         sys3 = ThreeBodySystem(
@@ -242,10 +268,16 @@ def generate(
         t_sim = time.time()
         try:
             result = run_simulation_3body(sys3, compute_megno=compute_megno)
-            result = label_result(result, window_fraction=window_fraction,
-                                   r_collision=R_COLL)
+            result = label_result(result, window_fraction=window_fraction)
+            if result.outcome == "ejection" and result.ejection_step is not None:
+                cut = min(result.ejection_step + 100, len(result.traj))
+                result.traj = result.traj[:cut]
+                result.E_hist = result.E_hist[:cut]
+                result.L_hist = result.L_hist[:cut]
+                result.time = result.time[:cut]
         except Exception as e:
             # Rare: bodies collide in step 0 or other numerical failure
+            print(f"[ERROR] sample {idx}: {e}")
             result = None
 
         # Reject failed simulations
@@ -257,7 +289,7 @@ def generate(
             continue
 
         # Quality filter (Phase 2 lesson — angular momentum conservation)
-        if result.dL_max > 1e-3:
+        if result.dL_max > 1e-2:
             continue
 
         sim_time = time.time() - t_sim
@@ -350,7 +382,10 @@ def generate(
     df.to_csv(csv_path, index=False)
 
     elapsed = time.time() - t0
-    print(f"\nDone in {elapsed:.1f}s  ({elapsed/len(df)*1000:.1f} ms/sample)")
+    if len(df) > 0:
+        print(f"\nDone in {elapsed:.1f}s  ({elapsed / len(df) * 1000:.1f} ms/sample)")
+    else:
+        print(f"\nDone in {elapsed:.1f}s  (no valid samples)")
     print(f"Saved: {csv_path}  ({len(df)} rows)")
     print("\nOutcome distribution:")
     for name, cnt in outcome_counts.items():

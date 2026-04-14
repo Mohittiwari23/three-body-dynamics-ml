@@ -103,12 +103,14 @@ def run_simulation_3body(system: ThreeBodySystem,
     r1=system.r1_0.copy(); r2=system.r2_0.copy(); r3=system.r3_0.copy()
     v1=system.v1_0.copy(); v2=system.v2_0.copy(); v3=system.v3_0.copy()
 
-    traj   = np.empty((N,3,2)); E_hist = np.empty(N); L_hist = np.empty(N)
+    traj   = np.empty((N,3,2))
+    E_hist = np.empty(N)
+    L_hist = np.empty(N)
 
+    collision_step = None
     E0 = total_energy_3(r1,r2,r3, v1,v2,v3, m1,m2,m3, G)
     L0 = total_Lz_3(r1,r2,r3, v1,v2,v3, m1,m2,m3)
     KE0 = 0.5*(m1*np.dot(v1,v1)+m2*np.dot(v2,v2)+m3*np.dot(v3,v3))
-    E_sc = abs(E0) if abs(E0) > 1e-10*KE0 else KE0
 
     if compute_megno:
         dr1 = np.zeros(2);
@@ -122,6 +124,16 @@ def run_simulation_3body(system: ThreeBodySystem,
 
         W = 0.0
         t_m = 0.0
+
+    # scale-aware threshold (same logic as labeller)
+    initial_scale = max(
+        np.linalg.norm(system.r1_0 - system.r2_0),
+        np.linalg.norm(system.r1_0 - system.r3_0),
+        np.linalg.norm(system.r2_0 - system.r3_0),
+        1e-6
+    )
+
+    r_collision = max(0.001, initial_scale * 0.005)
 
     for i in range(N):
         a1 = _a(r1,r2,G,m2)+_a(r1,r3,G,m3)
@@ -138,6 +150,14 @@ def run_simulation_3body(system: ThreeBodySystem,
         traj[i,0]=r1; traj[i,1]=r2; traj[i,2]=r3
         E_hist[i]=total_energy_3(r1,r2,r3,v1,v2,v3,m1,m2,m3,G)
         L_hist[i]=total_Lz_3(r1,r2,r3,v1,v2,v3,m1,m2,m3)
+        # --- COLLISION DETECTION (PHYSICS STOP CONDITION) ---
+        d12 = np.linalg.norm(r1 - r2)
+        d13 = np.linalg.norm(r1 - r3)
+        d23 = np.linalg.norm(r2 - r3)
+
+        if d12 < r_collision or d13 < r_collision or d23 < r_collision:
+            collision_step = i
+            break
 
         if compute_megno:
             t_m += dt
@@ -182,13 +202,31 @@ def run_simulation_3body(system: ThreeBodySystem,
                 dv2 *= scale;
                 dv3 *= scale
 
-    total_time = N * dt
-    megno = float(2.0 * W / total_time) if compute_megno else np.nan
+    # --- HANDLE EARLY TERMINATION ---
+    if collision_step is not None:
+        valid_N = collision_step + 1
+
+        traj = traj[:valid_N]
+        E_hist = E_hist[:valid_N]
+        L_hist = L_hist[:valid_N]
+
+        total_time = valid_N * dt
+        time_arr = np.linspace(0.0, total_time, valid_N)
+    else:
+        total_time = N * dt
+        time_arr = np.linspace(0.0, total_time, N)
+
+    if compute_megno and total_time > 10 * dt:
+        megno = float(2.0 * W / total_time)
+    else:
+        megno = np.nan
+
     res = ThreeBodyResult(
         traj=traj, E_hist=E_hist, L_hist=L_hist,
-        time=np.linspace(0.0, N*dt, N), E0=E0, L0=L0,
+        time=time_arr, E0=E0, L0=L0,
         system=system, MEGNO_final=megno
     )
+    res.collision_step = collision_step if 'collision_step' in locals() else None
     return res
 
 
