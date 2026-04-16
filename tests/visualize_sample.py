@@ -40,6 +40,6 @@ def visualize_row(csv_path, row_idx):
 
 if __name__ == "__main__":
     visualize_row(
-        csv_path="data/dataset3_sample/metadata3.csv",
-        row_idx=45
+        csv_path="data/dataset3_body/gen_data-200.csv",
+        row_idx=98
     )
