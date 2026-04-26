@@ -190,3 +190,166 @@ python tests/visualize_sample.py
 - [x] Phase 3 — Three-body dynamics, MEGNO, and stability classification
 - [ ] Phase 4 — Neural ODE / Hamiltonian neural network for trajectory prediction
 - [ ] Phase 5 — Parameter space mapping (stability boundaries as a function of mass ratios and initial separations)
+
+
+
+# ML Pipeline
+
+Predicts long-term gravitational outcomes (stable / unstable / chaotic) from **early-time trajectory data only**, using a multi-model cross-validated baseline and optional XGBoost hyperparameter tuning.
+
+---
+
+## Module Overview
+
+| File | Role |
+|---|---|
+| `features.py` | Feature engineering, group definitions (A–F), leakage policy |
+| `trainer.py` | Model registry, CV training, Optuna tuning, two-stage classifier |
+| `evaluator.py` | OOF evaluation, regime breakdown, CSV persistence |
+| `visualiser.py` | Confusion matrix, calibration, regime F1, feature importance plots |
+| `run_baseline.py` | End-to-end pipeline entrypoint |
+
+---
+
+## Feature Groups
+
+Controlled ablation across six configurations:
+
+| Group | Contents |
+|---|---|
+| A | Initial conditions only (t = 0) |
+| B | IC + early dynamics (w5 window) |
+| C | IC + early dynamics (w20 window) — **best baseline** |
+| D | w5 dynamics only |
+| E | w20 dynamics only |
+| F | IC + w5 + w20 + engineered physics features |
+
+**Leakage policy:** MEGNO, outcome labels, and trajectory metadata (`idx`, `traj_file`) are never included as features.
+
+---
+
+## Models
+
+Five tree-ensemble classifiers benchmarked via stratified 5-fold CV:
+
+- `decision_tree` — single tree; exposes raw decision boundaries
+- `random_forest` — bagged trees; reduces variance on distributed signals
+- `xgboost` — gradient boosting with L1/L2 regularisation
+- `lightgbm` — histogram boosting; efficient on high-cardinality continuous features
+- `catboost` — symmetric tree boosting; robust to correlated mass-ratio features
+
+All models use **inverse-frequency sample weights** computed from the training fold only.
+
+---
+
+## Running the Pipeline
+
+All commands run from the **project root** (directory above `ml_predictor/`).
+
+### Full baseline (all models × all feature groups)
+```bash
+python -m ml_predictor.run_baseline --data data/metadata3.csv
+```
+
+### Full baseline + XGBoost hyperparameter tuning on group C
+```bash
+python -m ml_predictor.run_baseline --data data/metadata3.csv --tune-xgb
+```
+
+### Single model / single feature group
+```bash
+python -m ml_predictor.run_baseline --data data/metadata3.csv --model lightgbm --feature-group C
+```
+
+### Smoke test (synthetic data, no real dataset needed)
+```bash
+python -m ml_predictor.run_baseline --smoke-test --tune-xgb --n-trials 10
+```
+
+### Skip slow steps for quick iteration
+```bash
+python -m ml_predictor.run_baseline --data data/metadata3.csv --no-two-stage --no-plots
+```
+
+---
+
+## CLI Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--data` | — | Path to metadata CSV |
+| `--output` | `results/baseline` | Output directory |
+| `--folds` | `5` | CV folds |
+| `--model` | all | One of: `decision_tree`, `random_forest`, `xgboost`, `lightgbm`, `catboost` |
+| `--feature-group` | all | One of: `A B C D E F` |
+| `--tune-xgb` | off | Run Optuna tuning for XGBoost on group C after baseline |
+| `--n-trials` | `75` | Number of Optuna trials |
+| `--no-two-stage` | off | Skip two-stage LightGBM classifier |
+| `--no-plots` | off | Skip plot generation |
+| `--smoke-test` | off | Use synthetic data instead of real dataset |
+
+---
+
+## Outputs
+
+```
+results/baseline/
+├── all_results.csv          # one row per (model, feature_group)
+├── best_model.csv           # single best row by macro F1
+├── group_C/
+│   ├── lightgbm/
+│   │   ├── confusion_matrix.png
+│   │   ├── calibration.png
+│   │   ├── regime_performance.png
+│   │   └── feature_importance.png
+│   └── xgboost/ ...
+└── tuned/
+    └── xgboost_tuned_C.csv  # tuned result (only if --tune-xgb)
+```
+
+`best_model.csv` is always recomputed after tuning — the tuned XGBoost competes on equal terms with all baseline rows.
+
+---
+
+## Evaluation Metrics
+
+| Metric | Why |
+|---|---|
+| **Macro F1** | Primary ranking metric; equal weight per class regardless of imbalance |
+| **Balanced accuracy** | Secondary; penalises class-imbalance exploitation |
+| **Mean Brier score** | Calibration; penalises overconfident wrong predictions |
+| **Per-class F1** | Diagnoses which outcome (stable / unstable / chaotic) the model struggles with |
+
+### Interpreting macro F1
+- `> 0.70` — strong early-time signal; model learning real physics
+- `0.50–0.70` — moderate signal; some regimes near the chaos horizon
+- `< 0.50` — poor signal; check leakage, window definition, or class imbalance
+
+---
+
+## Two-Stage Classifier (LightGBM only)
+
+Physically motivated hierarchical model run alongside the direct 3-class baseline:
+
+- **Stage 1** — Stable vs. Not-Stable (Hill criterion boundary; geometric question)
+- **Stage 2** — Unstable vs. Chaotic on the not-stable subset (energy exchange boundary; dynamical question)
+
+Disable with `--no-two-stage` if not needed.
+
+---
+
+## XGBoost Tuning Details
+
+Tuning runs **after** the full baseline loop and never modifies `MODEL_REGISTRY`. The search space:
+
+| Parameter | Range |
+|---|---|
+| `max_depth` | 3 – 8 |
+| `learning_rate` | 0.01 – 0.2 (log) |
+| `subsample` | 0.6 – 1.0 |
+| `colsample_bytree` | 0.6 – 1.0 |
+| `reg_alpha` | 1e-3 – 10 (log) |
+| `reg_lambda` | 1e-3 – 10 (log) |
+| `min_child_weight` | 0.01 – 10 (log) |
+
+Results saved to `results/baseline/tuned/xgboost_tuned_C.csv`. Optuna output is silenced; progress prints every 25 trials.
