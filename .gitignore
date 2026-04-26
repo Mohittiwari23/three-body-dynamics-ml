@@ -57,6 +57,7 @@ outputs/exp_b/models/
 # Regenerable outputs — commit only source code, not artefacts
 outputs/exp_a/plots/
 outputs/exp_b/plots/
+results/
 
 # Keep the outputs folder structure in git (empty dirs need a placeholder)
 !outputs/exp_a/.gitkeep
