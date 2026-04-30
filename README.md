@@ -204,25 +204,29 @@ Predicts long-term gravitational outcomes (stable / unstable / chaotic) from **e
 | File | Role |
 |---|---|
 | `features.py` | Feature engineering, group definitions (A–F), leakage policy |
-| `trainer.py` | Model registry, CV training, Optuna tuning, two-stage classifier |
+| `trainer.py` | Model registry, CV training, two-stage classifier |
 | `evaluator.py` | OOF evaluation, regime breakdown, CSV persistence |
 | `visualiser.py` | Confusion matrix, calibration, regime F1, feature importance plots |
 | `run_baseline.py` | End-to-end pipeline entrypoint |
+| `tune_lightgbm.py` | Optuna hyperparameter tuning for LightGBM |
 
 ---
 
 ## Feature Groups
 
-Controlled ablation across six configurations:
+Controlled ablation across nine configurations:
 
 | Group | Contents |
 |---|---|
 | A | Initial conditions only (t = 0) |
+| A+ | IC + engineered IC features |
 | B | IC + early dynamics (w5 window) |
-| C | IC + early dynamics (w20 window) — **best baseline** |
+| B+ | IC + IC-eng + w5 + w5-eng |
+| C | IC + early dynamics (w20 window) |
+| C+ | IC + IC-eng + w20 + w20-eng — **best baseline** |
 | D | w5 dynamics only |
 | E | w20 dynamics only |
-| F | IC + w5 + w20 + engineered physics features |
+| F | IC + IC-eng + w5 + w20 + w20-eng |
 
 **Leakage policy:** MEGNO, outcome labels, and trajectory metadata (`idx`, `traj_file`) are never included as features.
 
@@ -248,27 +252,27 @@ All commands run from the **project root** (directory above `ml_predictor/`).
 
 ### Full baseline (all models × all feature groups)
 ```bash
-python -m ml_predictor.run_baseline --data data/metadata3.csv
-```
-
-### Full baseline + XGBoost hyperparameter tuning on group C
-```bash
-python -m ml_predictor.run_baseline --data data/metadata3.csv --tune-xgb
+python -m ml_predictor.run_baseline --data data/final_metadata.csv
 ```
 
 ### Single model / single feature group
 ```bash
-python -m ml_predictor.run_baseline --data data/metadata3.csv --model lightgbm --feature-group C
+python -m ml_predictor.run_baseline --data data/final_metadata.csv --model lightgbm --feature-group C+
 ```
 
 ### Smoke test (synthetic data, no real dataset needed)
 ```bash
-python -m ml_predictor.run_baseline --smoke-test --tune-xgb --n-trials 10
+python -m ml_predictor.run_baseline --smoke-test
 ```
 
 ### Skip slow steps for quick iteration
 ```bash
-python -m ml_predictor.run_baseline --data data/metadata3.csv --no-two-stage --no-plots
+python -m ml_predictor.run_baseline --data data/final_metadata.csv --no-two-stage --no-plots
+```
+
+### LightGBM hyperparameter tuning
+```bash
+python -m ml_predictor.tune_lightgbm --data data/final_metadata.csv --feature-group C --n-trials 100
 ```
 
 ---
@@ -281,9 +285,7 @@ python -m ml_predictor.run_baseline --data data/metadata3.csv --no-two-stage --n
 | `--output` | `results/baseline` | Output directory |
 | `--folds` | `5` | CV folds |
 | `--model` | all | One of: `decision_tree`, `random_forest`, `xgboost`, `lightgbm`, `catboost` |
-| `--feature-group` | all | One of: `A B C D E F` |
-| `--tune-xgb` | off | Run Optuna tuning for XGBoost on group C after baseline |
-| `--n-trials` | `75` | Number of Optuna trials |
+| `--feature-group` | all | One of: `A A+ B B+ C C+ D E F` |
 | `--no-two-stage` | off | Skip two-stage LightGBM classifier |
 | `--no-plots` | off | Skip plot generation |
 | `--smoke-test` | off | Use synthetic data instead of real dataset |
@@ -295,7 +297,6 @@ python -m ml_predictor.run_baseline --data data/metadata3.csv --no-two-stage --n
 ```
 results/baseline/
 ├── all_results.csv          # one row per (model, feature_group)
-├── best_model.csv           # single best row by macro F1
 ├── group_C/
 │   ├── lightgbm/
 │   │   ├── confusion_matrix.png
@@ -304,10 +305,9 @@ results/baseline/
 │   │   └── feature_importance.png
 │   └── xgboost/ ...
 └── tuned/
-    └── xgboost_tuned_C.csv  # tuned result (only if --tune-xgb)
+    ├── lightgbm_tuned_C.csv     # tuned result
+    └── optuna_trials_C.csv      # full trial history
 ```
-
-`best_model.csv` is always recomputed after tuning — the tuned XGBoost competes on equal terms with all baseline rows.
 
 ---
 
@@ -338,18 +338,50 @@ Disable with `--no-two-stage` if not needed.
 
 ---
 
-## XGBoost Tuning Details
+## LightGBM Tuning Details
 
-Tuning runs **after** the full baseline loop and never modifies `MODEL_REGISTRY`. The search space:
+Runs independently via `tune_lightgbm.py` and never modifies `MODEL_REGISTRY`. Uses Optuna's `MedianPruner` — trials are pruned after fold 2 if the running mean falls below the median of completed trials, saving ~30–40% of compute. Progress prints every 25 trials.
 
-| Parameter | Range |
-|---|---|
-| `max_depth` | 3 – 8 |
-| `learning_rate` | 0.01 – 0.2 (log) |
-| `subsample` | 0.6 – 1.0 |
-| `colsample_bytree` | 0.6 – 1.0 |
-| `reg_alpha` | 1e-3 – 10 (log) |
-| `reg_lambda` | 1e-3 – 10 (log) |
-| `min_child_weight` | 0.01 – 10 (log) |
+| Parameter | Range | Scale |
+|---|---|---|
+| `num_leaves` | 16 – 128 | linear |
+| `max_depth` | 3 – 8 | linear |
+| `min_child_samples` | 5 – 100 | linear |
+| `learning_rate` | 0.01 – 0.2 | log |
+| `subsample` | 0.6 – 1.0 | linear |
+| `colsample_bytree` | 0.6 – 1.0 | linear |
+| `reg_alpha` | 1e-3 – 10 | log |
+| `reg_lambda` | 1e-3 – 10 | log |
+| `min_split_gain` | 0.0 – 1.0 | linear |
 
-Results saved to `results/baseline/tuned/xgboost_tuned_C.csv`. Optuna output is silenced; progress prints every 25 trials.
+Results saved to `results/baseline/tuned/lightgbm_tuned_{group}.csv`. Full Optuna trial history saved to `optuna_trials_{group}.csv`.
+
+---
+
+## Results
+
+All metrics are pooled OOF across 5 stratified folds.
+
+### Baseline — Top 10 of 45 runs
+
+| Model | Group | Macro F1 | F1 std | Bal. Acc | Brier | F1 stable | F1 unstable | F1 chaotic |
+|---|---|---|---|---|---|---|---|---|
+| lightgbm | F | 0.8275 | 0.0035 | 0.8484 | 0.0834 | 0.8420 | 0.8182 | 0.8222 |
+| lightgbm | C+ | 0.8233 | 0.0031 | 0.8455 | 0.0858 | 0.8403 | 0.8125 | 0.8171 |
+| xgboost | F | 0.8209 | 0.0024 | 0.8449 | 0.0855 | 0.8375 | 0.8117 | 0.8134 |
+| lightgbm | C | 0.8169 | 0.0019 | 0.8399 | 0.0883 | 0.8350 | 0.8050 | 0.8107 |
+| xgboost | C+ | 0.8165 | 0.0030 | 0.8406 | 0.0874 | 0.8373 | 0.8028 | 0.8094 |
+| lightgbm | B+ | 0.8126 | 0.0024 | 0.8359 | 0.0900 | 0.8370 | 0.7951 | 0.8059 |
+| xgboost | C | 0.8123 | 0.0041 | 0.8371 | 0.0903 | 0.8299 | 0.8017 | 0.8054 |
+| xgboost | B+ | 0.8082 | 0.0047 | 0.8342 | 0.0921 | 0.8333 | 0.7927 | 0.7985 |
+| lightgbm | B | 0.8054 | 0.0022 | 0.8281 | 0.0931 | 0.8327 | 0.7846 | 0.7991 |
+| xgboost | B | 0.7972 | 0.0029 | 0.8228 | 0.0957 | 0.8247 | 0.7778 | 0.7891 |
+
+### Tuned LightGBM — Group C
+
+| Model | Group | Macro F1 | Bal. Acc | Brier | F1 stable | F1 unstable | F1 chaotic |
+|---|---|---|---|---|---|---|---|
+| lightgbm (baseline) | C | 0.8169 | 0.8399 | 0.0883 | 0.8350 | 0.8050 | 0.8107 |
+| **lightgbm_tuned** | **C** | **0.8603** | **0.8648** | **0.0692** | **0.8742** | **0.8396** | **0.8671** |
+
++0.043 macro F1 over baseline on identical features. Tuned group C (0.8603) also exceeds untuned group F (0.8275, 29 features) — regularisation quality outweighs feature count.
