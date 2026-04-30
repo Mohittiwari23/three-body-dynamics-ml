@@ -9,44 +9,43 @@ prediction using early-time gravitational dynamics.
 DESIGN PHILOSOPHY
 ──────────────────────────────────────────────────────────────────────────────
 
-The dataset encodes trajectories of chaotic three-body gravitational systems.
-The goal is to predict long-term outcomes using *restricted early-time data*.
-
 Feature information is partitioned into three causally distinct tiers:
 
 Tier 1 — Initial Conditions (t = 0)
     Pure system state before any dynamical evolution. Encodes geometry,
-    energy, angular momentum, and mass hierarchy. Causally valid unconditionally.
+    energy, angular momentum, mass hierarchy, and orbital shape.
+    Causally valid unconditionally.
 
 Tier 2 — Early Window Dynamics (w5 / w20)
     Computed strictly within early trajectory windows. Encodes incipient
-    instability signatures: energy/angular-momentum drift, eccentricity
-    fluctuations, closest approaches. Window suffix (_w5, _w20) is
-    mandatory — conflating windows violates experimental isolation.
+    instability signatures: energy drift, eccentricity fluctuations, closest
+    approaches. Window suffix (_w5, _w20) is mandatory — conflating windows
+    violates experimental isolation.
+
+    dL_max_{w5,w20} are excluded. Max angular momentum drift is unreliable
+    under discrete trajectory sampling: a single coarse integration step
+    produces a spuriously large spike uncorrelated with true orbital drift.
+    dE_max is retained — fractional energy violation is a global integrator
+    diagnostic, less sensitive to individual step size.
 
 Tier 3 — Engineered Features
     Nonlinear combinations of Tier 1 + Tier 2. Encode known dynamical
-    stability laws (Hill criterion, escape velocity proximity, encounter
-    strength scaling). Each engineered feature is window-scoped when it
-    depends on dynamical quantities — critical for ablation validity.
+    stability laws (Mardling-Aarseth criterion, encounter strength scaling).
+    Added only in Group F to keep ablation groups A–E clean.
 
 ──────────────────────────────────────────────────────────────────────────────
 FEATURE GROUP EXPERIMENTS (A–F)
 ──────────────────────────────────────────────────────────────────────────────
 
-  A  →  IC only                              (pure geometry/invariants)
-  B  →  IC + w5 + w5_engineered             (early-window prediction)
-  C  →  IC + w20 + w20_engineered           (medium-window prediction)
-  D  →  w5 + w5_engineered only             (dynamics alone, short window)
-  E  →  w20 + w20_engineered only           (dynamics alone, medium window)
-  F  →  IC + w5 + w20 + w20_engineered      (full model, all information)
-
-Design rationale:
-  - Groups A/B/C isolate information gain from adding dynamics to IC.
-  - Groups D/E test whether IC is necessary or if dynamics alone suffice.
-  - Groups B vs C quantify the predictability gain from 5% → 20% window.
-  - Group F is the production model; uses w20 engineered (stronger signal)
-    rather than duplicating all engineered features for both windows.
+  A   →  IC only                              (10 features)
+  A+  →  IC + IC-eng                          (14 features)
+  B   →  IC + w5                              (17 features)
+  B+  →  IC + IC-eng + w5 + w5-eng           (22 features)
+  C   →  IC + w20                             (17 features)
+  C+  →  IC + IC-eng + w20 + w20-eng         (22 features)
+  D   →  w5 only                              (7 features)
+  E   →  w20 only                             (7 features)
+  F   →  IC + IC-eng + w5 + w20 + w20-eng    (29 features)
 
 ──────────────────────────────────────────────────────────────────────────────
 LEAKAGE POLICY (ENFORCED)
@@ -54,14 +53,14 @@ LEAKAGE POLICY (ENFORCED)
 
 NEVER include:
   - outcome labels (outcome, outcome_class, outcome_class4)
-  - MEGNO / MEGNO_clean (requires full trajectory)
-  - post-hoc computed quantities
+  - MEGNO / MEGNO_clean (requires full trajectory integration)
+  - E0_total, L0_total (absolute-scale duplicates of epsilon_total / h_total)
+  - individual mass columns m1, m2, m3 (mass ratios encode all physically
+    distinct information; absolute individual masses are degenerate with G
+    in N-body units). M_total is included as an IC feature — it sets the
+    overall gravitational scale and enters the Mardling-Aarseth criterion.
   - dataset metadata (traj_file, idx)
   - window-B features in a window-A experiment group
-
-Engineered features are window-scoped: w5 engineered uses ONLY w5 dynamics,
-w20 engineered uses ONLY w20 dynamics. Cross-window contamination is
-explicitly blocked at the group-selection level.
 """
 
 from __future__ import annotations
@@ -83,6 +82,8 @@ META_COLS: list[str] = [
     "idx",
     "traj_file",
     "regime",
+    "m1", "m2", "m3",     # individual masses — use ratios + M_total instead
+    "E0_total", "L0_total",
 ]
 
 LEAKY_COLS: list[str] = [
@@ -91,89 +92,77 @@ LEAKY_COLS: list[str] = [
 ]
 
 # =============================================================================
-# TIER 1: INITIAL CONDITION FEATURES  (t = 0, no dynamical evolution)
+# TIER 1: INITIAL CONDITION FEATURES  (t = 0)
+# Count: 10
 # =============================================================================
 
 IC_FEATURES: list[str] = [
-    # Global invariants — conserved by Newtonian gravity, computed at t=0
-    "epsilon_total",     # total specific energy; sets overall binding regime
-    "h_total",           # total angular momentum magnitude
-
-    # Mass hierarchy — determines Hill stability threshold scaling
-    "q12",               # m1/m2 inner binary mass ratio
-    "q13",               # m1/m3
-    "q23",               # m2/m3
-
-    # Spatial configuration — initial orbital geometry
-    "r12_init",          # inner binary separation
-    "r3_sep",            # outer body separation from barycentre
-
-    # Kinematic state — outer body velocity relative to local circular speed
-    "v3_frac",           # |v3| / v_circular; < 1 → sub-circular, > √2 → unbound
-    "v3_angle",          # direction of v3 ∈ [0, 2π); replaced by sin/cos in ENG
+    "epsilon_total",  # total specific energy
+    "h_total",        # total specific angular momentum magnitude
+    "q12",            # m1/m2 inner binary mass ratio
+    "q13",            # m1/m3
+    "q23",            # m2/m3
+    "M_total",        # total system mass — sets gravitational scale and
+                      # enters the Mardling-Aarseth criterion directly
+    "r12_init",       # inner binary separation
+    "r3_sep",         # outer body separation from system barycentre
+    "e_inner",        # initial inner binary eccentricity [0, 1)
+    "v3_frac",        # |v3| / v_circular
 ]
 
 # =============================================================================
 # TIER 2: EARLY WINDOW DYNAMICS (w5 = first 5% of inner orbital period)
+# Count: 7
 # =============================================================================
 
 W5_FEATURES: list[str] = [
-    "dE_max_w5",         # max fractional energy violation in [0, T_w5]
-    "dL_max_w5",         # max angular momentum drift in [0, T_w5]
-
-    "e12_std_w5",        # eccentricity fluctuation of inner binary
-    "e13_std_w5",        # eccentricity fluctuation of outer pair (1-3)
-    "e23_std_w5",        # eccentricity fluctuation of outer pair (2-3)
-
-    "r_min_12_w5",       # minimum separation of inner binary in window
-    "r_min_13_w5",       # minimum separation 1-3 in window
-    "r_min_23_w5",       # minimum separation 2-3 in window
+    "dE_max_w5",
+    "e12_std_w5",
+    "e13_std_w5",
+    "e23_std_w5",
+    "r_min_12_w5",
+    "r_min_13_w5",
+    "r_min_23_w5",
 ]
 
 # =============================================================================
 # TIER 2: EARLY WINDOW DYNAMICS (w20 = first 20% of inner orbital period)
+# Count: 7
 # =============================================================================
 
 W20_FEATURES: list[str] = [
     "dE_max_w20",
-    "dL_max_w20",
-
     "e12_std_w20",
     "e13_std_w20",
     "e23_std_w20",
-
     "r_min_12_w20",
     "r_min_13_w20",
     "r_min_23_w20",
 ]
 
 # =============================================================================
-# TIER 3: ENGINEERED FEATURES (window-scoped)
+# TIER 3: ENGINEERED FEATURES
 # =============================================================================
 
-# Structural features derived from IC only (window-independent)
+# Count: 4
 _IC_ENGINEERED: list[str] = [
-    "hill_ratio",           # Mardling-Aarseth stability proxy
-    "r_separation_ratio",   # compactness of the triple
-    "energy_partition",     # binding at outer orbit scale
-    "v3_margin",            # signed distance from escape velocity
-    "v3_sin",               # circular encoding of v3_angle
-    "v3_cos",               # circular encoding of v3_angle
+    "hill_ratio",            # Mardling-Aarseth stability proxy
+    "energy_partition",      # binding energy at outer orbit scale
+    "hierarchy_log",         # log separation ratio — hierarchy strength
+    "tidal_compactness_log", # log tidal forcing scale — outer-body compactness
 ]
 
-# Dynamical features engineered from w5 dynamics
+# Count: 1
 _W5_ENGINEERED: list[str] = [
-    "close_encounter_strength_w5",  # orbital perturbation per unit closest approach
-    "dL_dE_coupling_w5",            # simultaneous conservation law violation
+    "close_encounter_strength_w5",
 ]
 
-# Dynamical features engineered from w20 dynamics
+# Count: 1
 _W20_ENGINEERED: list[str] = [
     "close_encounter_strength_w20",
-    "dL_dE_coupling_w20",
 ]
 
-# Convenience aggregates for external use (visualiser, evaluator)
+# Convenience aggregates for external use
 IC_ENGINEERED_FEATURES: list[str] = _IC_ENGINEERED
 W5_ENGINEERED_FEATURES: list[str] = _W5_ENGINEERED
 W20_ENGINEERED_FEATURES: list[str] = _W20_ENGINEERED
@@ -187,82 +176,97 @@ DYN_FEATURES: list[str] = W5_FEATURES + W20_FEATURES
 
 def _engineer_ic_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute Tier 3 features that depend only on initial conditions.
+    Compute Tier 3 IC-engineered features. Called only for groups with ic_eng=True.
 
-    These are window-independent: valid for any feature group that includes IC.
+    Requires columns present in the raw dataset: r3_sep, r12_init,
+    M_total, m3, m1, m2, epsilon_total.
 
     hill_ratio
-        Proxy for Mardling-Aarseth (2001) hierarchical stability criterion.
-        r_out/r_in × (1 / 3(1 + q12))^(1/3).
-        This is the ratio of the outer semi-major axis to the Hill sphere
-        radius of the inner binary. Values ≲ 1 are unconditionally unstable.
+        Mardling-Aarseth (2001) hierarchical stability proxy.
 
-    r_separation_ratio
-        r12_init / r3_sep — system compactness.
-        When → 1, the outer body is at the same spatial scale as the inner
-        binary, making strong three-body coupling geometrically inevitable.
+        Stability requires:
+            (a_out / a_in) > C * (M_total / m3)^(1/3) / (1 - e_out)
+
+        Computed (ignoring e_out, not available as a direct IC feature):
+            hill_ratio = (r3_sep / r12_init) * (M_total / m3)^(-1/3)
+
+        M_total and m3 are raw dataset columns. Values ~1 indicate the
+        outer body is near the Hill sphere of the inner binary.
 
     energy_partition
-        |epsilon_total| × r3_sep — effective binding energy at the outer orbit
-        scale. Small values → outer body loosely bound → low energy exchange
-        required for ejection.
+        |epsilon_total| * r3_sep — binding energy at the outer orbit scale.
+        Small values indicate a loosely bound outer body, requiring little
+        energy exchange for ejection.
 
-    v3_margin
-        √2 − v3_frac — signed distance from escape velocity.
-        Positive → bound; zero → marginally bound; negative → already escaping.
+    hierarchy_log
+        log(r3_sep / r12_init) — log-scale separation ratio.
 
-    v3_sin, v3_cos
-        Circular encoding of v3_angle ∈ [0, 2π).
-        Tree models cannot bridge the 0/2π wrap discontinuity in raw angle.
-        Physical note: v3_cos ≈ −1 (retrograde) is empirically more stable
-        due to reduced resonance overlap with the inner binary.
+        The raw ratio r3_sep / r12_init enters both the Mardling-Aarseth
+        criterion and the encounter time scale. The log transform compresses
+        the right-skewed distribution of outer/inner separations (which
+        spans several orders of magnitude across hierarchical and compact
+        regimes) into a form that tree-based models can threshold linearly.
+        Negative values indicate r3_sep < r12_init, a physically pathological
+        configuration almost always chaotic.
+
+    tidal_compactness_log
+        log(m3) - log(m1 + m2) - 3*log(r3_sep) + 3*log(r12_init)
+
+        Encodes the log-scale tidal forcing amplitude of the third body on
+        the inner binary. The tidal acceleration on the inner binary from
+        body 3 scales as F_tidal ~ m3 / r3_sep^3, while the inner binary's
+        self-gravity scales as ~ (m1+m2) / r12_init^3. The ratio
+        F_tidal / F_self ~ (m3 / (m1+m2)) * (r12_init / r3_sep)^3
+        measures how strongly the outer body perturbs the inner orbit at
+        t = 0. High values signal strong tidal forcing even before any
+        dynamical evolution — a leading-order chaos predictor for non-
+        hierarchical configurations.
     """
+    eps = 1e-12
+
+    M_total_over_m3 = df["M_total"] / df["m3"]
+
     df["hill_ratio"] = (df["r3_sep"] / df["r12_init"]) * (
-        1.0 / (3.0 * (1.0 + df["q12"])) ** (1.0 / 3.0)
+        M_total_over_m3 ** (-1.0 / 3.0)
     )
-    df["r_separation_ratio"] = df["r12_init"] / df["r3_sep"]
-    df["energy_partition"]   = np.abs(df["epsilon_total"]) * df["r3_sep"]
-    df["v3_margin"]          = np.sqrt(2.0) - df["v3_frac"]
-    df["v3_sin"]             = np.sin(df["v3_angle"])
-    df["v3_cos"]             = np.cos(df["v3_angle"])
+    df["energy_partition"] = np.abs(df["epsilon_total"]) * df["r3_sep"]
+
+    df["hierarchy_log"] = np.log(
+        (df["r3_sep"] + eps) / (df["r12_init"] + eps)
+    )
+
+    df["tidal_compactness_log"] = (
+        np.log(df["m3"] + eps)
+        - np.log(df["m1"] + df["m2"] + eps)
+        - 3.0 * np.log(df["r3_sep"] + eps)
+        + 3.0 * np.log(df["r12_init"] + eps)
+    )
+
     return df
 
 
 def _engineer_window_features(df: pd.DataFrame, window: str) -> pd.DataFrame:
     """
-    Compute Tier 3 features that depend on a specific early window.
-
-    Parameters
-    ----------
-    df     : DataFrame containing raw dynamic features for `window`.
-    window : "w5" or "w20" — must match column suffixes in df.
+    Compute Tier 3 features for a specific early window.
 
     close_encounter_strength_{window}
-        max(e_ij_std) / min(r_min_outer) — instability strength per unit
-        closest approach. High value → strong chaotic perturbation in window.
-        This is the most physically direct chaos precursor available from
-        early-time data.
+        max(e_ij_std) / min(r_min_outer) — eccentricity perturbation
+        amplitude per unit closest approach distance.
 
-    dL_dE_coupling_{window}
-        dL_max × dE_max — product of angular momentum and energy drift.
-        Simultaneous violation of both conservation laws is a stronger
-        chaos signal than either alone. A near-circular orbit can have
-        moderate dE with near-zero dL; simultaneous violation means the
-        orbit geometry is being rapidly distorted.
+        The perturbation to the inner binary eccentricity during a close
+        encounter scales as delta_e ~ (m3 / r_min^2) * dt_enc. Dividing
+        the observed eccentricity fluctuation by r_min normalizes by
+        encounter depth. High values indicate strong chaotic forcing.
     """
     assert window in ("w5", "w20"), f"window must be 'w5' or 'w20', got {window!r}"
 
-    dE_col = f"dE_max_{window}"
-    dL_col = f"dL_max_{window}"
-
-    if dE_col not in df.columns:
-        return df  # window not present in this dataset — skip silently
+    if f"dE_max_{window}" not in df.columns:
+        return df
 
     rmin = np.minimum(
         df.get(f"r_min_13_{window}", pd.Series(np.inf, index=df.index)),
         df.get(f"r_min_23_{window}", pd.Series(np.inf, index=df.index)),
     )
-
     emax = np.maximum(
         df.get(f"e12_std_{window}", pd.Series(0.0, index=df.index)),
         np.maximum(
@@ -270,9 +274,7 @@ def _engineer_window_features(df: pd.DataFrame, window: str) -> pd.DataFrame:
             df.get(f"e23_std_{window}", pd.Series(0.0, index=df.index)),
         ),
     )
-
     df[f"close_encounter_strength_{window}"] = emax / (rmin + 1e-6)
-    df[f"dL_dE_coupling_{window}"]           = df[dL_col] * df[dE_col]
 
     return df
 
@@ -284,8 +286,10 @@ def engineer_features(df: pd.DataFrame, windows: list[str]) -> pd.DataFrame:
     Parameters
     ----------
     df      : DataFrame containing IC + requested window dynamic features.
-    windows : Subset of ["w5", "w20"] to engineer. Only windows whose raw
-              features are present will be processed; others are skipped.
+              Must include m1, m2, m3 (for hill_ratio, tidal_compactness_log)
+              even though individual masses are excluded from the output
+              matrix via META_COLS but required at compute time.
+    windows : Subset of ["w5", "w20"] to engineer.
 
     Returns
     -------
@@ -302,51 +306,76 @@ def engineer_features(df: pd.DataFrame, windows: list[str]) -> pd.DataFrame:
 # FEATURE GROUP SELECTION
 # =============================================================================
 
-# Maps group label → (base_feature_lists, windows_to_engineer)
-# base_feature_lists : lists of raw feature names to include
-# windows_to_engineer: which window engineered features to add
+# Feature group counts:
 #
-# IC_ENGINEERED is always added when IC is included (no window dependency).
-# v3_angle is always excluded — replaced by v3_sin/v3_cos in engineered groups,
-# kept out of non-engineered groups to avoid the wrap discontinuity issue while
-# maintaining strict experimental separation.
+#   A   IC only                                   10 + 0 + 0 = 10
+#   A+  IC + IC_eng                               10 + 4 + 0 = 14
+#   B   IC + w5                                   17 + 0 + 0 = 17
+#   B+  IC + IC_eng + w5 + w5_eng                 17 + 4 + 1 = 22
+#   C   IC + w20                                  17 + 0 + 0 = 17
+#   C+  IC + IC_eng + w20 + w20_eng               17 + 4 + 1 = 22
+#   D   w5 only                                    7 + 0 + 0 =  7
+#   E   w20 only                                   7 + 0 + 0 =  7
+#   F   IC + IC_eng + w5 + w20 + w20_eng          24 + 4 + 1 = 29
+#
+# NOTE: Group F computes to 29 features (10 IC + 4 IC_eng + 7 W5 + 7 W20
+# + 1 W20_eng). IC_eng grew from 2 to 4 with the addition of hierarchy_log
+# and tidal_compactness_log.
 
 _GROUP_SPEC: dict[str, dict] = {
     "A": {
         "bases":   [IC_FEATURES],
         "windows": [],
         "ic_eng":  False,
-        "desc":    "IC only — pure geometry and invariants",
+        "desc":    "IC only — raw baseline (10 features)",
+    },
+    "A+": {
+        "bases":   [IC_FEATURES],
+        "windows": [],
+        "ic_eng":  True,
+        "desc":    "IC + IC-engineered — physics invariants (14 features)",
     },
     "B": {
         "bases":   [IC_FEATURES, W5_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w5 — window gain, no physics eng. (17 features)",
+    },
+    "B+": {
+        "bases":   [IC_FEATURES, W5_FEATURES],
         "windows": ["w5"],
         "ic_eng":  True,
-        "desc":    "IC + w5 dynamics + w5 & IC engineered",
+        "desc":    "IC + IC-eng + w5 + w5-eng — full 5% model (22 features)",
     },
     "C": {
         "bases":   [IC_FEATURES, W20_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w20 — window gain, no physics eng. (17 features)",
+    },
+    "C+": {
+        "bases":   [IC_FEATURES, W20_FEATURES],
         "windows": ["w20"],
         "ic_eng":  True,
-        "desc":    "IC + w20 dynamics + w20 & IC engineered",
+        "desc":    "IC + IC-eng + w20 + w20-eng — full 20% model (22 features)",
     },
     "D": {
         "bases":   [W5_FEATURES],
-        "windows": ["w5"],
+        "windows": [],
         "ic_eng":  False,
-        "desc":    "w5 dynamics + w5 engineered only",
+        "desc":    "w5 dynamics only — pure dynamics test (7 features)",
     },
     "E": {
         "bases":   [W20_FEATURES],
-        "windows": ["w20"],
+        "windows": [],
         "ic_eng":  False,
-        "desc":    "w20 dynamics + w20 engineered only",
+        "desc":    "w20 dynamics only — pure dynamics test (7 features)",
     },
     "F": {
         "bases":   [IC_FEATURES, W5_FEATURES, W20_FEATURES],
-        "windows": ["w20"],   # w20 engineered is the stronger signal; w5 raw is included
+        "windows": ["w20"],
         "ic_eng":  True,
-        "desc":    "Full model: IC + w5 + w20 + w20 & IC engineered",
+        "desc":    "IC + IC-eng + w5 + w20 + w20-eng — full model (29 features)",
     },
 }
 
@@ -357,8 +386,11 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
 
     Parameters
     ----------
-    df            : Raw dataset (IC + window dynamic columns + labels + meta).
-    feature_group : One of A–F. See module docstring for definitions.
+    df            : Raw dataset. Must include m1, m2, m3 so that hill_ratio
+                    and tidal_compactness_log can be computed for groups with
+                    ic_eng=True (individual masses are excluded from the output
+                    matrix via META_COLS but required at compute time).
+    feature_group : One of A–F.
 
     Returns
     -------
@@ -366,12 +398,9 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
 
     Notes
     -----
-    - v3_angle is always excluded. Groups with engineered features include
-      v3_sin / v3_cos instead. Groups without engineering omit angle entirely
-      to keep experimental groups clean (v3_frac still provides speed info).
-    - Engineered features are computed on a copy; original df is not mutated.
-    - Missing columns are silently dropped with a warning — this handles
-      datasets that only have one window computed.
+    - v3_angle is always excluded (wrap discontinuity; not encoded).
+    - Engineered features are present in groups A+, B+, C+, and F.
+    - Missing columns trigger a UserWarning and are skipped gracefully.
     """
     feature_group = feature_group.upper()
     if feature_group not in _GROUP_SPEC:
@@ -382,33 +411,28 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
 
     spec = _GROUP_SPEC[feature_group]
 
-    # Assemble base feature names
     base_cols: list[str] = []
     for feat_list in spec["bases"]:
         base_cols.extend(feat_list)
 
-    # Compute engineered features on a copy
     windows = spec["windows"]
     has_engineering = spec["ic_eng"] or len(windows) > 0
 
+    df_work = df.copy()
+
     if has_engineering:
-        eng_windows = windows  # IC eng is always computed alongside window eng
-        df_work = engineer_features(df, eng_windows)
+        df_work = engineer_features(df_work, windows)
 
         eng_cols: list[str] = []
         if spec["ic_eng"]:
             eng_cols.extend(_IC_ENGINEERED)
         for w in windows:
-            eng_cols.extend(
-                _W5_ENGINEERED if w == "w5" else _W20_ENGINEERED
-            )
+            eng_cols.extend(_W5_ENGINEERED if w == "w5" else _W20_ENGINEERED)
     else:
-        df_work = df
         eng_cols = []
 
     desired_cols = base_cols + eng_cols
 
-    # Strict exclusion set
     exclude = set(LABEL_COLS + META_COLS + LEAKY_COLS + ["v3_angle"])
 
     available: list[str] = []
@@ -430,7 +454,6 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
             stacklevel=2,
         )
 
-    # Deduplicate while preserving order
     seen: set[str] = set()
     final_cols: list[str] = []
     for c in available:
@@ -447,10 +470,11 @@ def describe_feature_groups() -> None:
     for grp, spec in _GROUP_SPEC.items():
         n_base = sum(len(fl) for fl in spec["bases"])
         n_eng = (len(_IC_ENGINEERED) if spec["ic_eng"] else 0) + sum(
-            len(_W5_ENGINEERED if w == "w5" else _W20_ENGINEERED) for w in spec["windows"]
+            len(_W5_ENGINEERED if w == "w5" else _W20_ENGINEERED)
+            for w in spec["windows"]
         )
         print(f"  {grp}  {spec['desc']}")
-        print(f"     raw={n_base}  engineered={n_eng}  total≈{n_base + n_eng}")
+        print(f"     raw={n_base}  engineered={n_eng}  total={n_base + n_eng}")
     print("─" * 63)
 
 
@@ -460,13 +484,17 @@ def describe_feature_groups() -> None:
 
 def get_labels(df: pd.DataFrame) -> pd.Series:
     """
-    Extract the classification target.
-
     Returns
     -------
     Series[int] : 0 = stable, 1 = unstable, 2 = chaotic.
     """
     return df["outcome_class"].astype(int)
+
+
+# features.py
+def get_feature_group_names() -> list[str]:
+    """Return all registered feature group identifiers."""
+    return list(_GROUP_SPEC.keys())
 
 
 # =============================================================================
@@ -481,9 +509,6 @@ def describe_features(
     """
     Generate a structured feature audit for a given feature group.
 
-    Acts as a data integrity checkpoint: detects missing window computations,
-    pathological distributions, tier imbalance, and unintended leakage.
-
     Parameters
     ----------
     df            : Raw dataset.
@@ -497,18 +522,18 @@ def describe_features(
     feat_df = get_feature_matrix(df, feature_group=feature_group)
 
     tier_map: dict[str, str] = {}
-    for f in IC_FEATURES:
-        tier_map[f] = "IC"
-    for f in W5_FEATURES:
-        tier_map[f] = "W5"
-    for f in W20_FEATURES:
-        tier_map[f] = "W20"
-    for f in _IC_ENGINEERED:
-        tier_map[f] = "ENG-IC"
-    for f in _W5_ENGINEERED:
-        tier_map[f] = "ENG-W5"
-    for f in _W20_ENGINEERED:
-        tier_map[f] = "ENG-W20"
+    for feat in IC_FEATURES:
+        tier_map[feat] = "IC"
+    for feat in W5_FEATURES:
+        tier_map[feat] = "W5"
+    for feat in W20_FEATURES:
+        tier_map[feat] = "W20"
+    for feat in _IC_ENGINEERED:
+        tier_map[feat] = "ENG-IC"
+    for feat in _W5_ENGINEERED:
+        tier_map[feat] = "ENG-W5"
+    for feat in _W20_ENGINEERED:
+        tier_map[feat] = "ENG-W20"
 
     rows = []
     for col in feat_df.columns:
@@ -548,4 +573,4 @@ def describe_features(
 
         print("─" * 55)
 
-    return summary
+    return summary 

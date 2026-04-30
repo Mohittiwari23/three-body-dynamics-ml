@@ -3,9 +3,9 @@ ml_predictor/evaluator.py
 ===============
 
 Evaluation module aligned with:
-- trainer.py (CVResults, train_xgb_tuned_cv)
+- trainer.py (CVResults)
 - features.py (labels + regimes)
-- run_baseline.py (save_results_csv, save_best_model_csv)
+- run_baseline.py (save_results_csv)
 
 Focus:
 - OOF-based evaluation
@@ -100,7 +100,7 @@ def evaluate(
 
     Parameters
     ----------
-    results       : CVResults from train_model_cv or train_xgb_tuned_cv.
+    results       : CVResults from train_model_cv or train_lgbm_tuned_cv.
     df            : Full dataset DataFrame. Required for regime breakdown.
     model_name    : Model identifier — stored on report for CSV traceability.
                     If empty, falls back to results.model_name.
@@ -193,26 +193,22 @@ def _regime_breakdown(y_true, y_pred, regimes):
         yt = y_true[mask]
         yp = y_pred[mask]
 
-        f1 = f1_score(yt, yp, average="macro", zero_division=0)
-        ba = balanced_accuracy_score(yt, yp)
-
-        rc = _per_class_recall(yt, yp)
-        pf1 = f1_score(yt, yp, average=None, labels=[0,1,2], zero_division=0)
+        f1  = f1_score(yt, yp, average="macro", zero_division=0)
+        ba  = balanced_accuracy_score(yt, yp)
+        rc  = _per_class_recall(yt, yp)
+        pf1 = f1_score(yt, yp, average=None, labels=[0, 1, 2], zero_division=0)
 
         rows.append({
-            "regime": regime,
-            "n_samples": int(mask.sum()),
-
-            "macro_f1": f1,
-            "balanced_acc": ba,
-
-            "f1_stable": pf1[0],
-            "f1_unstable": pf1[1],
-            "f1_chaotic": pf1[2],
-
-            "recall_stable": rc[0],
+            "regime":          regime,
+            "n_samples":       int(mask.sum()),
+            "macro_f1":        f1,
+            "balanced_acc":    ba,
+            "f1_stable":       pf1[0],
+            "f1_unstable":     pf1[1],
+            "f1_chaotic":      pf1[2],
+            "recall_stable":   rc[0],
             "recall_unstable": rc[1],
-            "recall_chaotic": rc[2],
+            "recall_chaotic":  rc[2],
         })
 
     return pd.DataFrame(rows)
@@ -256,10 +252,6 @@ def save_results_csv(
     Per-class F1/recall are flattened to individual columns so the CSV
     is directly queryable without JSON parsing.
 
-    The tuned XGBoost report (model_name="xgboost_tuned") is included
-    as a normal row — no special handling needed because EvaluationReport
-    now carries model_name explicitly.
-
     Parameters
     ----------
     reports    : Flat list of EvaluationReport — one per training run.
@@ -267,7 +259,7 @@ def save_results_csv(
 
     Returns
     -------
-    DataFrame with all rows — passed to save_best_model_csv by the caller.
+    DataFrame with all rows.
     """
     rows = []
 
@@ -313,44 +305,6 @@ def save_results_csv(
     print(f"  Saved: {path}")
 
     return df
-
-
-def save_best_model_csv(
-    df_all:     pd.DataFrame,
-    output_dir: Path | str = Path("results/baseline"),
-) -> pd.DataFrame:
-    """
-    Extract the single best row from the all_results DataFrame and write
-    best_model.csv.
-
-    "Best" is defined as the highest pooled OOF macro F1. In the case of
-    ties (rare in practice), balanced_acc is the secondary criterion —
-    it penalises class-imbalance exploitation more directly than macro F1.
-
-    The tuned XGBoost row competes on equal terms here — if it outperforms
-    all baseline rows it will appear as best_model.csv.
-
-    Parameters
-    ----------
-    df_all     : DataFrame returned by save_results_csv.
-    output_dir : Directory to write best_model.csv into.
-
-    Returns
-    -------
-    Single-row DataFrame for the best result.
-    """
-    best = df_all.sort_values(
-        ["macro_f1", "balanced_acc"], ascending=False
-    ).head(1)
-
-    output_dir = Path(output_dir)
-    path = output_dir / "best_model.csv"
-    best.to_csv(path, index=False)
-    print(f"  Saved: {path}  "
-          f"[{best['model'].values[0]} | group {best['feature_group'].values[0]} | "
-          f"macro F1 = {best['macro_f1'].values[0]:.4f}]")
-
-    return best
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,7 +380,8 @@ def _print_report(report: EvaluationReport) -> None:
     Regime breakdown is omitted from terminal output — it is preserved
     in the EvaluationReport object for downstream analysis.
     """
-    label = f"{report.model_name} | group {report.feature_group}" if report.feature_group else report.model_name
+    label = (f"{report.model_name} | group {report.feature_group}"
+             if report.feature_group else report.model_name)
 
     print(f"\n  [{label}]")
     print(f"  Macro F1: {report.macro_f1:.4f} (fold σ={report.fold_macro_f1_std:.4f}) | "

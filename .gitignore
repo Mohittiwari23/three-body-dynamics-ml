@@ -18,6 +18,9 @@ build/
 MANIFEST
 pip-wheel-metadata/
 
+# ── CatBoost artifacts ───────────────────────────────────────────────────────
+catboost_info/
+
 # ── PyCharm / JetBrains ───────────────────────────────────────────────────────
 .idea/
 

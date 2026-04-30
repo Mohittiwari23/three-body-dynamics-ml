@@ -47,8 +47,7 @@ Design
        All models receive inverse-frequency sample weights per training fold.
        Weights computed from training fold ONLY — no leakage from val fold.
 
-  5. train_model_cv() is the unified entry point.
-     train_lightgbm_cv() is preserved as a backward-compatible alias.
+  5. train_model_cv() is the unified entry point for all baseline models.
 
   6. train_two_stage_cv() uses LightGBM only — it is a physically-motivated
      hierarchical classifier (Hill boundary → energy exchange boundary),
@@ -70,7 +69,6 @@ Physical motivation:
 """
 
 from __future__ import annotations
-import optuna
 
 import numpy as np
 import pandas as pd
@@ -113,7 +111,6 @@ EARLY_STOPPING_ROUNDS = 50
 #     on small datasets (N~500–5000). Deeper trees mostly add noise given the
 #     strong main effects of hill_ratio and r_min_ij.
 #   - n_estimators=500 for boosting models; early stopping handles actual count.
-
 
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {
 
@@ -200,15 +197,15 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     "catboost": {
         "cls": CatBoostClassifier,
         "params": {
-            "loss_function":        "MultiClass",
-            "eval_metric":          "TotalF1",
-            "iterations":           500,
-            "depth":                5,
-            "learning_rate":        0.05,
-            "l2_leaf_reg":          1.0,
+            "loss_function":         "MultiClass",
+            "eval_metric":           "TotalF1",
+            "iterations":            500,
+            "depth":                 5,
+            "learning_rate":         0.05,
+            "l2_leaf_reg":           1.0,
             "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
-            "random_seed":          42,
-            "verbose":              0,
+            "random_seed":           42,
+            "verbose":               0,
             "thread_count":         -1,
         },
         "early_stop":  True,   # handled internally via early_stopping_rounds param
@@ -487,10 +484,15 @@ def _fit_model(
     return model
 
 
-def _predict_proba(model, model_name: str, X: np.ndarray, feature_names: list[str] | None = None) -> np.ndarray:
+def _predict_proba(
+    model,
+    model_name:    str,
+    X:             np.ndarray,
+    feature_names: list[str] | None = None,
+) -> np.ndarray:
     """
-    Uniform predict_proba interface across all 5 models.
-    Returns (n_samples, N_CLASSES) float32 arrays.
+    Uniform predict_proba interface across all models.
+    Returns (n_samples, N_CLASSES) float32 array.
 
     LightGBM is fitted with named features; passing a named DataFrame at
     predict time suppresses the feature-name mismatch UserWarning.
@@ -499,289 +501,7 @@ def _predict_proba(model, model_name: str, X: np.ndarray, feature_names: list[st
         X_in = pd.DataFrame(X, columns=feature_names)
     else:
         X_in = X
-    proba = model.predict_proba(X_in)
-    return proba.astype(np.float32)
-
-def _optuna_objective_xgb(trial, df, n_folds, feature_group):
-    """
-    Optuna objective for XGBoost hyperparameter search.
-
-    Builds the model directly from trial params — never touches MODEL_REGISTRY.
-    This avoids the global mutation + restore anti-pattern, which corrupts the
-    registry permanently if a trial raises an exception before restoration.
-
-    The CV loop is inlined (not delegated to train_model_cv) so that the
-    params dict is owned entirely by this function and is not shared state.
-    """
-    # ── Searchable hyperparameters ────────────────────────────────────────────
-    # Ranges are physically motivated:
-    #   max_depth 3–8   : shallow enough to avoid overfitting on N~5000,
-    #                     deep enough to capture hill_ratio × r_min interactions.
-    #   learning_rate   : log-uniform; boosting benefits from log-scale exploration.
-    #   subsample/col   : row and column subsampling — standard regularisation.
-    #   reg_alpha/lambda: L1 + L2; important when IC features (q12/q13/q23)
-    #                     are correlated — L1 can zero out redundant mass ratios.
-    #   min_child_weight: minimum sum of instance weights in a leaf child.
-    #                     Higher values → more conservative splits on rare classes.
-
-    trial_params = {
-        "max_depth":         trial.suggest_int  ("max_depth",         3,    8          ),
-        "learning_rate":     trial.suggest_float("learning_rate",     0.01, 0.2,  log=True),
-        "subsample":         trial.suggest_float("subsample",         0.6,  1.0        ),
-        "colsample_bytree":  trial.suggest_float("colsample_bytree",  0.6,  1.0        ),
-        "reg_alpha":         trial.suggest_float("reg_alpha",         1e-3, 10.0, log=True),
-        "reg_lambda":        trial.suggest_float("reg_lambda",        1e-3, 10.0, log=True),
-        "min_child_weight":  trial.suggest_float("min_child_weight",  1e-2, 10.0, log=True),
-    }
-
-    # ── Fixed params (not tuned — structurally required) ─────────────────────
-    params = {
-        **trial_params,
-        "n_estimators":          500,
-        "objective":             "multi:softprob",
-        "num_class":             N_CLASSES,
-        "eval_metric":           "mlogloss",
-        "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
-        "random_state":          42,
-        "verbosity":             0,
-        "n_jobs":                -1,
-    }
-
-    # ── CV with fresh model instances — no registry involvement ───────────────
-    X = get_feature_matrix(df, feature_group=feature_group)
-    y = get_labels(df).values
-    X_arr = X.values.astype(np.float32)
-
-    class_counts = np.bincount(y)
-    min_count    = class_counts[class_counts > 0].min()
-    safe_splits  = max(2, min(n_folds, min_count))
-
-    skf    = StratifiedKFold(n_splits=safe_splits, shuffle=True, random_state=42)
-    scores = []
-
-    for train_idx, val_idx in skf.split(X_arr, y):
-        X_tr, X_v = X_arr[train_idx], X_arr[val_idx]
-        y_tr, y_v = y[train_idx],     y[val_idx]
-        sw         = sample_weights_from_labels(y_tr)
-
-        model = xgb.XGBClassifier(**params)
-        model.fit(
-            X_tr, y_tr,
-            sample_weight = sw,
-            eval_set      = [(X_v, y_v)],
-            verbose       = False,
-        )
-
-        pred  = model.predict(X_v)
-        score = f1_score(y_v, pred, average="macro", zero_division=0)
-        scores.append(score)
-
-    return float(np.mean(scores))
-
-def tune_xgboost_optuna(
-    df:            pd.DataFrame,
-    n_trials:      int = 75,
-    n_folds:       int = 5,
-    feature_group: str = "C",
-) -> tuple[optuna.Study, dict]:
-    """
-    Bayesian hyperparameter search for XGBoost via Optuna.
-
-    Restricted to feature_group="C" (IC + w20) — the configuration where
-    XGBoost is already the best baseline. Tuning other groups is redundant
-    unless the ablation study reveals a different bottleneck.
-
-    Design decisions:
-      - Optuna stdout suppressed entirely; a single progress line per
-        N_REPORT_INTERVAL trials is printed instead.
-      - The study and best_params are both returned so the caller can
-        (a) inspect the full trial history and (b) pass best_params
-        directly to train_xgb_tuned_cv without touching MODEL_REGISTRY.
-
-    Parameters
-    ----------
-    df            : Full dataset DataFrame.
-    n_trials      : Number of Optuna trials (default 75 — sufficient for
-                    7-param search; diminishing returns beyond ~100).
-    n_folds       : CV folds inside each trial evaluation.
-    feature_group : Feature configuration to tune on (should be "C").
-
-    Returns
-    -------
-    study      : Completed Optuna study (full trial history).
-    best_params : Ready-to-use XGBoost param dict (tuned + fixed params merged).
-    """
-    N_REPORT_INTERVAL = 25   # print progress every N trials
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    def _progress_callback(study: optuna.Study, trial: optuna.Trial) -> None:
-        n = trial.number + 1
-        if n % N_REPORT_INTERVAL == 0 or n == n_trials:
-            print(f"  [Optuna] Trial {n:>3}/{n_trials} | "
-                  f"best macro F1 = {study.best_value:.4f}")
-
-    study = optuna.create_study(direction="maximize")
-    study.optimize(
-        lambda trial: _optuna_objective_xgb(trial, df, n_folds, feature_group),
-        n_trials   = n_trials,
-        callbacks  = [_progress_callback],
-        show_progress_bar = False,
-    )
-
-    # Merge tuned params with fixed structural params into one ready-to-use dict
-    best_params = {
-        **study.best_params,
-        "n_estimators":          500,
-        "objective":             "multi:softprob",
-        "num_class":             N_CLASSES,
-        "eval_metric":           "mlogloss",
-        "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
-        "random_state":          42,
-        "verbosity":             0,
-        "n_jobs":                -1,
-    }
-
-    print(f"\n  [Optuna] Search complete — best macro F1: {study.best_value:.4f}")
-    print(f"  Best params: " +
-          ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
-                    for k, v in study.best_params.items()))
-
-    return study, best_params
-
-def train_xgb_tuned_cv(
-    df:            pd.DataFrame,
-    best_params:   dict,
-    n_folds:       int  = 5,
-    feature_group: str  = "C",
-    verbose:       bool = True,
-) -> CVResults:
-    """
-    Train XGBoost with Optuna-tuned hyperparameters via stratified CV.
-
-    This is intentionally separate from train_model_cv — it accepts an
-    explicit params dict rather than reading from MODEL_REGISTRY, so the
-    baseline registry is never mutated and the tuned result is a clean
-    additional data point rather than a replacement.
-
-    Physical context:
-      Feature group C (IC + w20) is the sweet spot for XGBoost because:
-        - IC features (hill_ratio, r_separation_ratio) provide the geometric
-          stability boundary — a hard threshold the model can learn exactly.
-        - w20 dynamics (dE_max, r_min_ij, e_std) carry the chaos precursor
-          signal accumulated over the first 20% of the integration window.
-      Tuning matters here because the optimal regularisation (reg_alpha/lambda)
-      depends on the correlation structure of IC + w20 features jointly.
-
-    Parameters
-    ----------
-    df            : Full dataset DataFrame.
-    best_params   : Complete XGBoost param dict from tune_xgboost_optuna().
-                    Must include both tuned and fixed structural params.
-    n_folds       : CV folds.
-    feature_group : Feature configuration — should match what was tuned on.
-    verbose       : Print per-fold summary line.
-
-    Returns
-    -------
-    CVResults — same structure as train_model_cv output, with
-                model_name = "xgboost_tuned".
-    """
-    X = get_feature_matrix(df, feature_group=feature_group)
-    y = get_labels(df).values
-    regimes = df["regime"].values if "regime" in df.columns else np.zeros(len(df))
-
-    feature_names = list(X.columns)
-    X_arr         = X.values.astype(np.float32)
-
-    class_counts = np.bincount(y)
-    min_count    = class_counts[class_counts > 0].min()
-    safe_splits  = max(2, min(n_folds, min_count))
-
-    skf     = StratifiedKFold(n_splits=safe_splits, shuffle=True, random_state=42)
-    results = CVResults(model_name="xgboost_tuned", feature_names=feature_names)
-
-    oof_true  = np.full(len(y), -1, dtype=int)
-    oof_pred  = np.full(len(y), -1, dtype=int)
-    oof_proba = np.zeros((len(y), N_CLASSES), dtype=np.float32)
-
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_arr, y)):
-        X_train, X_val = X_arr[train_idx], X_arr[val_idx]
-        y_train, y_val = y[train_idx],     y[val_idx]
-        sw_train        = sample_weights_from_labels(y_train)
-
-        model = xgb.XGBClassifier(**best_params)
-        model.fit(
-            X_train, y_train,
-            sample_weight = sw_train,
-            eval_set      = [(X_val, y_val)],
-            verbose       = False,
-        )
-
-        proba_val = model.predict_proba(X_val).astype(np.float32)
-        pred_val  = np.argmax(proba_val, axis=1)
-
-        oof_true[val_idx]  = y_val
-        oof_pred[val_idx]  = pred_val
-        oof_proba[val_idx] = proba_val
-
-        macro_f1 = f1_score(y_val, pred_val, average="macro", zero_division=0)
-        bal_acc  = balanced_accuracy_score(y_val, pred_val)
-        cm       = confusion_matrix(y_val, pred_val, labels=[0, 1, 2])
-
-        brier_vals = [
-            brier_score_loss((y_val == cls).astype(float), proba_val[:, cls])
-            for cls in range(N_CLASSES)
-        ]
-        brier = float(np.mean(brier_vals))
-
-        results.fold_macro_f1.append(macro_f1)
-        results.fold_balanced_acc.append(bal_acc)
-        results.fold_brier.append(brier)
-        results.fold_cms.append(cm)
-        results.models.append(model)
-
-        if verbose:
-            print(f"  Fold {fold_idx+1}/{safe_splits} | "
-                  f"Macro F1={macro_f1:.4f} | "
-                  f"Bal.Acc={bal_acc:.4f} | "
-                  f"Brier={brier:.4f}")
-
-    results.oof_true   = oof_true
-    results.oof_pred   = oof_pred
-    results.oof_proba  = oof_proba
-    results.oof_regime = regimes
-
-    if verbose:
-        print(f"  OOF Macro F1 : {results.mean_macro_f1:.4f} ± {results.std_macro_f1:.4f}")
-        print(f"  OOF Bal. Acc : {np.mean(results.fold_balanced_acc):.4f}")
-        print(f"  OOF Brier    : {np.mean(results.fold_brier):.4f}")
-
-    return results
-
-
-
-
-def train_lightgbm_cv(
-    df:            pd.DataFrame,
-    n_folds:       int  = 5,
-    feature_group: str  = "C",
-    lgbm_params:   dict | None = None,
-    verbose:       bool = True,
-) -> CVResults:
-    """
-    Backward-compatible alias for train_model_cv(model_name='lightgbm').
-
-    lgbm_params overrides are NOT forwarded — use train_model_cv() directly
-    for custom hyperparameter control.
-    """
-    return train_model_cv(
-        df            = df,
-        model_name    = "lightgbm",
-        n_folds       = n_folds,
-        feature_group = feature_group,
-        verbose       = verbose,
-    )
+    return model.predict_proba(X_in).astype(np.float32)
 
 
 # ── Two-stage classifier (LightGBM only) ─────────────────────────────────────
@@ -790,7 +510,6 @@ def train_two_stage_cv(
     df:            pd.DataFrame,
     n_folds:       int  = 5,
     feature_group: str  = "C",
-    lgbm_params:   dict | None = None,
     verbose:       bool = True,
 ) -> tuple[CVResults, CVResults]:
     """

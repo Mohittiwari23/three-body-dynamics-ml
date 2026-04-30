@@ -1,7 +1,7 @@
 """
 ml_predictor/run_baseline.py
 ==================
-Multi-model baseline: 5 classifiers × 6 feature groups + Macro F1 benchmarking.
+Multi-model baseline: 5 classifiers × 9 feature groups + Macro F1 benchmarking.
 
 Usage
 -----
@@ -12,10 +12,7 @@ Usage
   python -m ml_predictor.run_baseline --smoke-test
 
   # Run a single model and feature group:
-  python -m ml_predictor.run_baseline --smoke-test --model lightgbm --feature-group C
-
-  # Run full baseline then tune XGBoost on group C:
-  python -m ml_predictor.run_baseline --data data/dataset3/metadata3.csv --tune-xgb
+  python -m ml_predictor.run_baseline --smoke-test --model lightgbm --feature-group C+
 
 Pipeline
 --------
@@ -27,13 +24,6 @@ Pipeline
        c. Optional two-stage comparison (LightGBM only)
        d. Save per-group plots
   4. Save all_results.csv  — one row per (model, feature_group)
-  5. Save best_model.csv   — single best row by macro F1
-
-  If --tune-xgb is set (runs after the baseline loop):
-  6. Optuna search over XGBoost hyperparameters on feature group C
-  7. Train tuned model with best params (train_xgb_tuned_cv)
-  8. Evaluate and save xgboost_tuned_C.csv
-  9. Update best_model.csv if tuned model wins
 
 Interpreting results
 --------------------
@@ -70,19 +60,14 @@ from ml_predictor.features  import describe_features, get_feature_matrix, get_la
 from ml_predictor.trainer   import (
     train_model_cv,
     train_two_stage_cv,
-    train_xgb_tuned_cv,
-    tune_xgboost_optuna,
     MODEL_REGISTRY,
 )
 from ml_predictor.evaluator import (
     evaluate,
     leakage_sanity_check,
     save_results_csv,
-    save_best_model_csv,
 )
 from ml_predictor.visualiser import plot_all
-
-
 
 
 # ── Synthetic data generator (smoke test only) ───────────────────────────────
@@ -121,10 +106,10 @@ def _make_synthetic_dataset(n: int = 600, seed: int = 42) -> pd.DataFrame:
             r12 = rng.uniform(0.5, 4.0)
             r3  = r12 * rng.uniform(1.0 if label == 1 else 3.0, 8.0)
 
-            r_min_scale  = {0: 0.8,  1: 0.15, 2: 0.4 }[label]
-            e_std_scale  = {0: 0.02, 1: 0.08, 2: 0.15}[label]
-            dE_scale     = {0: 1e-5, 1: 5e-4, 2: 1e-4}[label]
-            dL_scale     = {0: 1e-5, 1: 5e-4, 2: 1e-4}[label]
+            r_min_scale = {0: 0.8,  1: 0.15, 2: 0.4 }[label]
+            e_std_scale = {0: 0.02, 1: 0.08, 2: 0.15}[label]
+            dE_scale    = {0: 1e-5, 1: 5e-4, 2: 1e-4}[label]
+            dL_scale    = {0: 1e-5, 1: 5e-4, 2: 1e-4}[label]
 
             rows.append({
                 # Meta
@@ -143,24 +128,24 @@ def _make_synthetic_dataset(n: int = 600, seed: int = 42) -> pd.DataFrame:
                 "v3_angle":      rng.uniform(0.0, 2 * np.pi),
 
                 # w5 dynamics
-                "dE_max_w5":     abs(rng.normal(0, dE_scale)),
-                "dL_max_w5":     abs(rng.normal(0, dL_scale)),
-                "e12_std_w5":    abs(rng.normal(0, e_std_scale)) + 0.005,
-                "e13_std_w5":    abs(rng.normal(0, e_std_scale)) + 0.005,
-                "e23_std_w5":    abs(rng.normal(0, e_std_scale)) + 0.005,
-                "r_min_12_w5":   max(r12 * rng.uniform(0.3, 1.0) * r_min_scale, 0.01),
-                "r_min_13_w5":   max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
-                "r_min_23_w5":   max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
+                "dE_max_w5":    abs(rng.normal(0, dE_scale)),
+                "dL_max_w5":    abs(rng.normal(0, dL_scale)),
+                "e12_std_w5":   abs(rng.normal(0, e_std_scale)) + 0.005,
+                "e13_std_w5":   abs(rng.normal(0, e_std_scale)) + 0.005,
+                "e23_std_w5":   abs(rng.normal(0, e_std_scale)) + 0.005,
+                "r_min_12_w5":  max(r12 * rng.uniform(0.3, 1.0) * r_min_scale, 0.01),
+                "r_min_13_w5":  max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
+                "r_min_23_w5":  max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
 
                 # w20 dynamics (longer window → stronger signal for chaotic)
-                "dE_max_w20":    abs(rng.normal(0, dE_scale * 1.5)),
-                "dL_max_w20":    abs(rng.normal(0, dL_scale * 1.5)),
-                "e12_std_w20":   abs(rng.normal(0, e_std_scale * 1.5)) + 0.005,
-                "e13_std_w20":   abs(rng.normal(0, e_std_scale * 1.5)) + 0.005,
-                "e23_std_w20":   abs(rng.normal(0, e_std_scale * 1.5)) + 0.005,
-                "r_min_12_w20":  max(r12 * rng.uniform(0.3, 1.0) * r_min_scale, 0.01),
-                "r_min_13_w20":  max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
-                "r_min_23_w20":  max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
+                "dE_max_w20":   abs(rng.normal(0, dE_scale * 1.5)),
+                "dL_max_w20":   abs(rng.normal(0, dL_scale * 1.5)),
+                "e12_std_w20":  abs(rng.normal(0, e_std_scale * 1.5)) + 0.005,
+                "e13_std_w20":  abs(rng.normal(0, e_std_scale * 1.5)) + 0.005,
+                "e23_std_w20":  abs(rng.normal(0, e_std_scale * 1.5)) + 0.005,
+                "r_min_12_w20": max(r12 * rng.uniform(0.3, 1.0) * r_min_scale, 0.01),
+                "r_min_13_w20": max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
+                "r_min_23_w20": max(r3  * rng.uniform(0.1, 0.5) * r_min_scale, 0.01),
 
                 # Labels
                 "outcome_class": label,
@@ -184,16 +169,12 @@ def run_baseline(
     verbose:       bool        = True,
     feature_group: str | None  = None,
     model:         str | None  = None,
-    tune_xgb:      bool        = False,
-    n_trials:      int         = 75,
 ) -> dict:
     """
     Full multi-model baseline pipeline.
 
     Runs every combination of (model, feature_group) unless restricted by
-    the model or feature_group arguments. Optuna tuning for XGBoost on
-    feature group C is a separate post-baseline step — it does not affect
-    the baseline loop in any way and never mutates MODEL_REGISTRY.
+    the model or feature_group arguments.
 
     Parameters
     ----------
@@ -204,16 +185,12 @@ def run_baseline(
     smoke_test    : Use synthetic data instead of real dataset.
     save_plots    : Save confusion matrix, calibration, importance plots.
     verbose       : Print per-fold progress and per-run evaluation summary.
-    feature_group : One of A–F. Default = run all.
+    feature_group : One of A–F (and variants). Default = run all.
     model         : One of the MODEL_REGISTRY keys. Default = run all.
-    tune_xgb      : Run Optuna tuning for XGBoost on feature group C after
-                    the baseline loop. Saves xgboost_tuned_C.csv separately.
-    n_trials      : Number of Optuna trials (used only if tune_xgb=True).
 
     Returns
     -------
     dict keyed by (model_name, feature_group) → {results, report, summary}
-    Also contains key ("xgboost_tuned", "C") if tune_xgb=True.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -251,7 +228,7 @@ def run_baseline(
     describe_features(df, verbose=False)
 
     # ── 3. Resolve run scope ──────────────────────────────────────────────────
-    ALL_GROUPS = ["A", "B", "C", "D", "E", "F"]
+    ALL_GROUPS = ["A", "A+", "B", "B+", "C", "C+", "D", "E", "F"]
     ALL_MODELS = list(MODEL_REGISTRY.keys())
 
     groups_to_run = [feature_group] if feature_group is not None else ALL_GROUPS
@@ -332,10 +309,9 @@ def run_baseline(
                 },
             }
 
-    # ── 5. Save baseline CSVs ─────────────────────────────────────────────────
+    # ── 5. Save results CSV ───────────────────────────────────────────────────
     print("\n── Saving baseline results ──")
-    df_all  = save_results_csv(all_reports, output_dir=output_dir)
-    df_best = save_best_model_csv(df_all,   output_dir=output_dir)
+    df_all = save_results_csv(all_reports, output_dir=output_dir)
 
     print("\n── Leaderboard (macro F1) ──")
     print(
@@ -344,107 +320,7 @@ def run_baseline(
         .to_string(index=False)
     )
 
-    # ── 6. XGBoost hyperparameter tuning (post-baseline, group C only) ────────
-    if tune_xgb:
-        _run_xgb_tuning(
-            df         = df,
-            output_dir = output_dir,
-            n_folds    = n_folds,
-            n_trials   = n_trials,
-            save_plots = save_plots,
-            verbose    = verbose,
-            all_outputs= all_outputs,
-            df_all     = df_all,
-        )
-
     return all_outputs
-
-
-# ── XGBoost tuning step (separated for clarity) ───────────────────────────────
-
-def _run_xgb_tuning(
-    df:          pd.DataFrame,
-    output_dir:  Path,
-    n_folds:     int,
-    n_trials:    int,
-    save_plots:  bool,
-    verbose:     bool,
-    all_outputs: dict,
-    df_all:      pd.DataFrame,
-) -> None:
-    """
-    Post-baseline Optuna tuning for XGBoost on feature group C.
-
-    Intentionally separated from run_baseline's main loop so it is
-    impossible for tuning to affect baseline results:
-      - MODEL_REGISTRY is never touched
-      - best_params is a local variable passed directly to train_xgb_tuned_cv
-      - the tuned result is written to xgboost_tuned_C.csv, separate from
-        all_results.csv, so the two are never conflated
-
-    best_model.csv is updated to include the tuned row only if it beats
-    the current best — it is re-derived from the combined report list.
-    """
-    TUNING_GROUP = "C"
-
-    print(f"\n── XGBoost Optuna tuning | group {TUNING_GROUP} | {n_trials} trials ──")
-
-    study, best_params = tune_xgboost_optuna(
-        df            = df,
-        n_trials      = n_trials,
-        n_folds       = n_folds,
-        feature_group = TUNING_GROUP,
-    )
-
-    print(f"\n  Training XGBoost (tuned) | group {TUNING_GROUP} ...")
-
-    tuned_results = train_xgb_tuned_cv(
-        df            = df,
-        best_params   = best_params,
-        n_folds       = n_folds,
-        feature_group = TUNING_GROUP,
-        verbose       = verbose,
-    )
-
-    tuned_report = evaluate(
-        tuned_results,
-        df            = df,
-        model_name    = "xgboost_tuned",
-        feature_group = TUNING_GROUP,
-        verbose       = verbose,
-    )
-
-    # ── Save tuned result to its own CSV ──────────────────────────────────────
-    print("\n── Saving tuned result ──")
-    df_tuned = save_results_csv(
-        [tuned_report],
-        output_dir = output_dir / "tuned",
-    )
-    # Rename the file to be explicit about what it contains
-    src  = output_dir / "tuned" / "all_results.csv"
-    dest = output_dir / "tuned" / "xgboost_tuned_C.csv"
-    src.rename(dest)
-    print(f"  Renamed → {dest}")
-
-    # ── Re-derive best_model.csv across baseline + tuned ─────────────────────
-    # Combine the baseline df_all with the single tuned row and recompute.
-    # This ensures best_model.csv always reflects the globally best result.
-    df_combined = pd.concat([df_all, df_tuned], ignore_index=True)
-    save_best_model_csv(df_combined, output_dir=output_dir)
-
-    # ── Optional plots for tuned model ───────────────────────────────────────
-    if save_plots:
-        tuned_dir = output_dir / "tuned" / "xgboost_tuned"
-        tuned_dir.mkdir(parents=True, exist_ok=True)
-        plot_all(results=tuned_results, report=tuned_report, output_dir=tuned_dir)
-
-    # ── Store in all_outputs for caller inspection ────────────────────────────
-    all_outputs[("xgboost_tuned", TUNING_GROUP)] = {
-        "results": tuned_results,
-        "report":  tuned_report,
-        "study":   study,
-        "best_params": best_params,
-    }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -466,15 +342,11 @@ def _parse_args():
     p.add_argument("--smoke-test",    action="store_true",
                    help="Run on synthetic data (no real dataset needed)")
     p.add_argument("--feature-group", type=str, default=None,
-                   help="Feature group A–F. Default = run all.")
+                   help="Feature group (A, A+, B, B+, C, C+, D, E, F). "
+                        "Default = run all.")
     p.add_argument("--model",         type=str, default=None,
                    help=f"Model to run. One of: {list(MODEL_REGISTRY.keys())}. "
                         "Default = run all.")
-    p.add_argument("--tune-xgb",      action="store_true",
-                   help="Run Optuna tuning for XGBoost on feature group C "
-                        "after the baseline loop. Saves xgboost_tuned_C.csv.")
-    p.add_argument("--n-trials",      type=int, default=75,
-                   help="Number of Optuna trials for XGBoost tuning (default 75).")
     return p.parse_args()
 
 
@@ -489,6 +361,4 @@ if __name__ == "__main__":
         save_plots    = not args.no_plots,
         feature_group = args.feature_group,
         model         = args.model,
-        tune_xgb      = args.tune_xgb,
-        n_trials      = args.n_trials,
     )
