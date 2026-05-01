@@ -82,10 +82,10 @@ from three_body.integrator3 import ThreeBodySystem, run_simulation_3body
 from three_body.labeller import label_result
 
 G = 1.0
-N_SAMPLES     = 5000
+N_SAMPLES     = 100
 COMPUTE_MEGNO = True
 SEED          = 42
-OUTPUT_DIR    = Path(__file__).resolve().parent.parent / "data" / "dataset3"
+OUTPUT_DIR    = Path(__file__).resolve().parent.parent / "data" / "dataset3_2"
 
 
 # ---------------------------------------------------------------------------
@@ -112,22 +112,21 @@ IC_RAW = [
 ]
 
 # dE_slope excluded: near-zero for all outcomes due to symplectic conservation
-DYN_W5 = [
-    "dE_max_w5",
-    "r_min_12_w5", "r_min_13_w5", "r_min_23_w5",
-    "e12_std_w5",  "e13_std_w5",  "e23_std_w5",
-]
+WINDOWS = [5, 10, 15, 20, 25, 30]
 
-DYN_W20 = [
-    "dE_max_w20",
-    "r_min_12_w20", "r_min_13_w20", "r_min_23_w20",
-    "e12_std_w20",  "e13_std_w20",  "e23_std_w20",
-]
+DYN_GROUPS = {
+    w: [
+        f"dE_max_w{w}",
+        f"r_min_12_w{w}", f"r_min_13_w{w}", f"r_min_23_w{w}",
+        f"e12_std_w{w}",  f"e13_std_w{w}",  f"e23_std_w{w}",
+    ]
+    for w in WINDOWS
+}
 
-TIER0 = IC_NORM
-TIER1 = IC_NORM + DYN_W5
-TIER2 = IC_NORM + DYN_W20
-
+TIERS = {
+    w: IC_NORM + DYN_GROUPS[w]
+    for w in WINDOWS
+}
 
 # ---------------------------------------------------------------------------
 # CoM frame placement
@@ -300,12 +299,14 @@ def generate(
                 or np.isnan(result.traj).any()):
             rejected["nan"] += 1; continue
 
-        dL = feats["dL_max_w20"]
         dE = feats["dE_max_w20"]
-        if dL > 0.02:
-            rejected["dL"] += 1; continue
-        if dE > 0.1 and result.E0 < 0:
-            rejected["dE"] += 1; continue
+
+        if max(feats[f"dL_max_w{w}"] for w in WINDOWS) > 0.02:
+            rejected["dL"] += 1
+            continue
+        if max(feats[f"dE_max_w{w}"] for w in WINDOWS) > 0.1:
+            rejected["dE"] += 1
+            continue
 
         ms = int((time.time()-t_sim)*1000)
         bucket = "unstable" if result.outcome in ("ejection","collision") else result.outcome
@@ -329,54 +330,48 @@ def generate(
             time   = result.time.astype(np.float32),
         )
 
-        rows.append({
-            # Identifiers
-            "idx": idx, "regime": regime,
-            # Raw geometry (metadata)
+        row = {
+            "idx": idx,
+            "regime": regime,
+
             "m1": m1, "m2": m2, "m3": m3, "M_total": M_total,
             "r12_init": r12, "r3_sep": r3_sep,
             "v3_angle": v3_angle, "e_inner": e_inner,
-            # IC features NORMALISED (TIER0)
+
             "q12": q12, "q13": q13, "q23": q23,
-            "v3_frac":       v3_mag / np.sqrt(G*M_total/r3_sep),
+            "v3_frac": v3_mag / np.sqrt(G * M_total / r3_sep),
             "epsilon_total": result.E0 / M_total,
-            "h_total":       result.L0 / M_total,
-            # IC features RAW (ablation only)
+            "h_total": result.L0 / M_total,
+
             "E0_total": result.E0,
             "L0_total": result.L0,
-            # 5% window features (TIER1) -- dE_slope excluded (zero signal)
-            "dE_max_w5":   feats["dE_max_w5"],
-            "r_min_12_w5": feats["r_min_12_w5"],
-            "r_min_13_w5": feats["r_min_13_w5"],
-            "r_min_23_w5": feats["r_min_23_w5"],
-            "e12_std_w5":  feats["e12_std_w5"],
-            "e13_std_w5":  feats["e13_std_w5"],
-            "e23_std_w5":  feats["e23_std_w5"],
-            # 20% window features (TIER2) -- dE_slope excluded
-            "dE_max_w20":   feats["dE_max_w20"],
-            "r_min_12_w20": feats["r_min_12_w20"],
-            "r_min_13_w20": feats["r_min_13_w20"],
-            "r_min_23_w20": feats["r_min_23_w20"],
-            "e12_std_w20":  feats["e12_std_w20"],
-            "e13_std_w20":  feats["e13_std_w20"],
-            "e23_std_w20":  feats["e23_std_w20"],
-            # Metadata only (NOT ML features)
-            "MEGNO":       meg,
+
+            "MEGNO": meg,
             "MEGNO_clean": meg_c,
-            "dL_max_w5":   feats["dL_max_w5"],
-            "dL_max_w20":  feats["dL_max_w20"],
-            # Labels
-            "outcome":        result.outcome,
-            "outcome_class":  OUTCOME_MAP3[result.outcome],
+
+            "outcome": result.outcome,
+            "outcome_class": OUTCOME_MAP3[result.outcome],
             "outcome_class4": result.outcome_class,
-        })
+        }
+
+        for w in WINDOWS:
+            row[f"dL_max_w{w}"] = feats[f"dL_max_w{w}"]
+            row[f"dE_max_w{w}"] = feats[f"dE_max_w{w}"]
+            row[f"r_min_12_w{w}"] = feats[f"r_min_12_w{w}"]
+            row[f"r_min_13_w{w}"] = feats[f"r_min_13_w{w}"]
+            row[f"r_min_23_w{w}"] = feats[f"r_min_23_w{w}"]
+            row[f"e12_std_w{w}"] = feats[f"e12_std_w{w}"]
+            row[f"e13_std_w{w}"] = feats[f"e13_std_w{w}"]
+            row[f"e23_std_w{w}"] = feats[f"e23_std_w{w}"]
+
+        rows.append(row)
 
         if idx % 250 == 0 or idx < 5:
             print(f"{idx:5d}  {regime:>15}  {result.outcome:>10}  "
                   f"{meg_c:7.3f}  {ms:6d}")
 
     df = pd.DataFrame(rows)
-    csv_path = output_dir / "metadata3.csv"
+    csv_path = output_dir / "metadata3_2.csv"
     df.to_csv(csv_path, index=False)
 
     elapsed = time.time() - t0
@@ -389,10 +384,6 @@ def generate(
     for name, cnt in outcome_counts.items():
         pct = 100*cnt/total if total else 0
         print(f"  {name:>12}: {cnt:5d}  ({pct:.1f}%)")
-    print(f"\nML feature tiers:")
-    print(f"  TIER0  IC_NORM only:          {len(TIER0)} features")
-    print(f"  TIER1  IC_NORM + 5% window:   {len(TIER1)} features")
-    print(f"  TIER2  IC_NORM + 20% window:  {len(TIER2)} features")
     return df
 
 

@@ -1,60 +1,5 @@
 """
 three_body/labeller.py
-=======================
-Labels three-body simulation outcomes and extracts EARLY-WINDOW features.
-
-Outcome labels
---------------
-  0 = stable    : bound, MEGNO ≤ 3, no ejection or merger
-  1 = ejection  : one body escapes (positive E0 or separation > 10× scale)
-  2 = collision : two bodies merge (separation < 0.5% of system scale)
-  3 = chaotic   : bound but MEGNO > 3 — chaotic and will likely disrupt
-
-Detection priority (order matters)
-------------------------------------
-  1. Ejection  — checked first: escaping system should not be labelled chaotic
-  2. Chaotic   — checked before collision: chaotic near-misses are NOT mergers
-  3. Collision — only reached by bound, non-chaotic systems
-  4. Stable    — default
-
-MEGNO is the labelling criterion for chaotic systems. It is NOT stored
-as an ML feature — that would make chaotic classification circular
-(the label is defined by MEGNO > 3, so a model with MEGNO as input
-is given the answer key).
-
-Feature extraction: TWO WINDOWS
----------------------------------
-All dynamical features are extracted at TWO window sizes:
-  - 5% window  (suffix _w5)  : minimal simulation cost
-  - 20% window (suffix _w20) : standard early-warning window
-
-This enables the key ML experiment:
-  IC-only vs IC+5% vs IC+20% accuracy comparison
-  → quantifies the value of each unit of simulation time
-
-Features that are NOT included in the ML set
----------------------------------------------
-  MEGNO, MEGNO_clean : label-defining — circular if used as features
-  dL_max             : quality filter metric, not physics signal
-  epsilon_total      : when epsilon > 0 → ejection trivially, making
-                       classification trivially solvable without ML.
-                       Store in metadata but exclude from ML features.
-                       Use only on BOUND (epsilon < 0) samples.
-
-e_ij_std bounds
----------------
-Instantaneous eccentricity e_ij diverges for unbound pairs (E_pair > 0,
-r → ∞). Raw e_ij_std can reach 500+ for ejecting systems.
-Fix: each e_ij sample is capped at max_e=10 before computing std.
-This gives a physically meaningful bounded feature: large std still
-signals strong perturbations; the cap prevents infinite values from
-escaping pairs dominating the signal.
-
-Quality gate
-------------
-  dL_max ≤ 0.02           : angular momentum conservation
-  dE_max_w20 ≤ 0.1        : energy conservation (new — catches
-                             normalisation blowup near E₀ ≈ 0)
 """
 
 from __future__ import annotations
@@ -65,7 +10,7 @@ OUTCOME_NAMES   = {0: "stable", 1: "ejection", 2: "collision", 3: "chaotic"}
 OUTCOME_CLASSES = {"stable": 0, "ejection": 1, "collision": 2, "chaotic": 3}
 MEGNO_CHAOTIC   = 3.0
 E_PAIR_CAP      = 10.0   # cap on instantaneous eccentricity per sample
-
+WINDOWS = [5, 10, 15, 20, 25, 30]
 
 def _inst_e_safe(ra, rb, va, vb, ma, mb, G, e_cap=E_PAIR_CAP):
     """
@@ -214,29 +159,40 @@ def label_result(
     result.ejection_step  = ejection_step
     result.collision_step = collision_step
 
-    # ── Feature extraction at 5% and 20% windows ────────────────────────────
-    K5  = max(2, int(N * 0.05))
-    K20 = max(2, int(N * 0.20))
+    # ── Feature extraction at 5% to 30% windows ────────────────────────────
+    all_feats = {}
 
-    feats_w5  = _extract_window_features(
-        traj[:K5],  E_hist[:K5],  L_hist[:K5],  time_[:K5],
-        sys_, dt, E0, L0, suffix="_w5"
-    )
-    feats_w20 = _extract_window_features(
-        traj[:K20], E_hist[:K20], L_hist[:K20], time_[:K20],
-        sys_, dt, E0, L0, suffix="_w20"
-    )
+    for w in WINDOWS:
+        K = max(2, int(N * (w / 100.0)))
 
-    # Store 20% window values on result object for backward compat
-    result.dE_max   = feats_w20["dE_max_w20"]
-    result.dL_max   = feats_w20["dL_max_w20"]
-    result.dE_slope = feats_w20["dE_slope_w20"]
-    result.r_min_12 = feats_w20["r_min_12_w20"]
-    result.r_min_13 = feats_w20["r_min_13_w20"]
-    result.r_min_23 = feats_w20["r_min_23_w20"]
-    result.e12_std  = feats_w20["e12_std_w20"]
-    result.e13_std  = feats_w20["e13_std_w20"]
-    result.e23_std  = feats_w20["e23_std_w20"]
+        feats_w = _extract_window_features(
+            traj[:K],
+            E_hist[:K],
+            L_hist[:K],
+            time_[:K],
+            sys_,
+            dt,
+            E0,
+            L0,
+            suffix=f"_w{w}"
+        )
 
-    features = {**feats_w5, **feats_w20}
+        all_feats.update(feats_w)
+
+    # Keep 20% as reference window (important for filters + compatibility)
+    w_ref = 20
+
+    result.dE_max = all_feats[f"dE_max_w{w_ref}"]
+    result.dL_max = all_feats[f"dL_max_w{w_ref}"]
+    result.dE_slope = all_feats[f"dE_slope_w{w_ref}"]
+
+    result.r_min_12 = all_feats[f"r_min_12_w{w_ref}"]
+    result.r_min_13 = all_feats[f"r_min_13_w{w_ref}"]
+    result.r_min_23 = all_feats[f"r_min_23_w{w_ref}"]
+
+    result.e12_std = all_feats[f"e12_std_w{w_ref}"]
+    result.e13_std = all_feats[f"e13_std_w{w_ref}"]
+    result.e23_std = all_feats[f"e23_std_w{w_ref}"]
+
+    features = all_feats
     return result, features
