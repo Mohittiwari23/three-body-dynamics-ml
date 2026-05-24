@@ -82,7 +82,7 @@ from three_body.integrator3 import ThreeBodySystem, run_simulation_3body
 from three_body.labeller import label_result
 
 G = 1.0
-N_SAMPLES     = 100
+N_SAMPLES     = 5000
 COMPUTE_MEGNO = True
 SEED          = 42
 OUTPUT_DIR    = Path(__file__).resolve().parent.parent / "data" / "dataset3_2"

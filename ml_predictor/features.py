@@ -16,36 +16,65 @@ Tier 1 — Initial Conditions (t = 0)
     energy, angular momentum, mass hierarchy, and orbital shape.
     Causally valid unconditionally.
 
-Tier 2 — Early Window Dynamics (w5 / w20)
-    Computed strictly within early trajectory windows. Encodes incipient
-    instability signatures: energy drift, eccentricity fluctuations, closest
-    approaches. Window suffix (_w5, _w20) is mandatory — conflating windows
-    violates experimental isolation.
+Tier 2 — Early Window Dynamics (w5 / w10 / w15 / w20 / w25 / w30)
+    Computed strictly within early trajectory windows, where the suffix
+    denotes the fraction of the inner orbital period observed:
+      w5  = first 5%
+      w10 = first 10%
+      w15 = first 15%
+      w20 = first 20%
+      w25 = first 25%
+      w30 = first 30%
+    Window suffix (_wN) is mandatory — conflating windows violates
+    experimental isolation.
 
-    dL_max_{w5,w20} are excluded. Max angular momentum drift is unreliable
-    under discrete trajectory sampling: a single coarse integration step
-    produces a spuriously large spike uncorrelated with true orbital drift.
-    dE_max is retained — fractional energy violation is a global integrator
-    diagnostic, less sensitive to individual step size.
+    dL_max_{wN} are excluded across all windows. Max angular momentum
+    drift is unreliable under discrete trajectory sampling: a single coarse
+    integration step produces a spuriously large spike uncorrelated with
+    true orbital drift. dE_max is retained — fractional energy violation
+    is a global integrator diagnostic, less sensitive to individual step size.
 
 Tier 3 — Engineered Features
     Nonlinear combinations of Tier 1 + Tier 2. Encode known dynamical
     stability laws (Mardling-Aarseth criterion, encounter strength scaling).
-    Added only in Group F to keep ablation groups A–E clean.
+    Added only in groups with the + suffix and in group D.
 
 ──────────────────────────────────────────────────────────────────────────────
-FEATURE GROUP EXPERIMENTS (A–F)
+FEATURE GROUP EXPERIMENTS
 ──────────────────────────────────────────────────────────────────────────────
 
-  A   →  IC only                              (10 features)
-  A+  →  IC + IC-eng                          (14 features)
-  B   →  IC + w5                              (17 features)
-  B+  →  IC + IC-eng + w5 + w5-eng           (22 features)
-  C   →  IC + w20                             (17 features)
-  C+  →  IC + IC-eng + w20 + w20-eng         (22 features)
-  D   →  w5 only                              (7 features)
-  E   →  w20 only                             (7 features)
-  F   →  IC + IC-eng + w5 + w20 + w20-eng    (29 features)
+Baselines (2 groups)
+  A   →  IC only                                          (10 features)
+  A+  →  IC + IC_eng                                      (14 features)
+
+Core (12 groups)
+  B5  →  IC + w5                                          (17 features)
+  B10 →  IC + w10                                         (17 features)
+  B15 →  IC + w15                                         (17 features)
+  B20 →  IC + w20                                         (17 features)
+  B25 →  IC + w25                                         (17 features)
+  B30 →  IC + w30                                         (17 features)
+  B5+ →  IC + IC_eng + w5  + w5_eng                       (22 features)
+  B10+→  IC + IC_eng + w10 + w10_eng                      (22 features)
+  B15+→  IC + IC_eng + w15 + w15_eng                      (22 features)
+  B20+→  IC + IC_eng + w20 + w20_eng                      (22 features)
+  B25+→  IC + IC_eng + w25 + w25_eng                      (22 features)
+  B30+→  IC + IC_eng + w30 + w30_eng                      (22 features)
+
+Window-only (6 groups)
+  C5  →  w5  only                                         (7 features)
+  C10 →  w10 only                                         (7 features)
+  C15 →  w15 only                                         (7 features)
+  C20 →  w20 only                                         (7 features)
+  C25 →  w25 only                                         (7 features)
+  C30 →  w30 only                                         (7 features)
+
+Upper bound (1 group)
+  D   →  IC + IC_eng + w5 + w10 + w15 + w20 + w25 + w30
+          + w30_eng                                        (57 features)
+        = 10 IC + 4 IC_eng + 6×7 window features + 1 w30_eng
+        Role: upper bound / kitchen-sink benchmark.
+        Use: establishes performance ceiling, not for deployment.
 
 ──────────────────────────────────────────────────────────────────────────────
 LEAKAGE POLICY (ENFORCED)
@@ -60,6 +89,7 @@ NEVER include:
     in N-body units). M_total is included as an IC feature — it sets the
     overall gravitational scale and enters the Mardling-Aarseth criterion.
   - dataset metadata (traj_file, idx)
+  - dL_max_{wN} for any window (unreliable under discrete sampling)
   - window-B features in a window-A experiment group
 """
 
@@ -91,6 +121,12 @@ LEAKY_COLS: list[str] = [
     "MEGNO_clean",
 ]
 
+# dL_max columns are excluded across all windows — unreliable under discrete
+# trajectory sampling (single coarse step produces spurious spike).
+_DL_MAX_COLS: list[str] = [
+    f"dL_max_w{s}" for s in [5, 10, 15, 20, 25, 30]
+]
+
 # =============================================================================
 # TIER 1: INITIAL CONDITION FEATURES  (t = 0)
 # Count: 10
@@ -111,8 +147,8 @@ IC_FEATURES: list[str] = [
 ]
 
 # =============================================================================
-# TIER 2: EARLY WINDOW DYNAMICS (w5 = first 5% of inner orbital period)
-# Count: 7
+# TIER 2: EARLY WINDOW DYNAMICS
+# Each window: 7 features (dL_max excluded; dE_max + 3 e_std + 3 r_min)
 # =============================================================================
 
 W5_FEATURES: list[str] = [
@@ -125,10 +161,25 @@ W5_FEATURES: list[str] = [
     "r_min_23_w5",
 ]
 
-# =============================================================================
-# TIER 2: EARLY WINDOW DYNAMICS (w20 = first 20% of inner orbital period)
-# Count: 7
-# =============================================================================
+W10_FEATURES: list[str] = [
+    "dE_max_w10",
+    "e12_std_w10",
+    "e13_std_w10",
+    "e23_std_w10",
+    "r_min_12_w10",
+    "r_min_13_w10",
+    "r_min_23_w10",
+]
+
+W15_FEATURES: list[str] = [
+    "dE_max_w15",
+    "e12_std_w15",
+    "e13_std_w15",
+    "e23_std_w15",
+    "r_min_12_w15",
+    "r_min_13_w15",
+    "r_min_23_w15",
+]
 
 W20_FEATURES: list[str] = [
     "dE_max_w20",
@@ -139,6 +190,36 @@ W20_FEATURES: list[str] = [
     "r_min_13_w20",
     "r_min_23_w20",
 ]
+
+W25_FEATURES: list[str] = [
+    "dE_max_w25",
+    "e12_std_w25",
+    "e13_std_w25",
+    "e23_std_w25",
+    "r_min_12_w25",
+    "r_min_13_w25",
+    "r_min_23_w25",
+]
+
+W30_FEATURES: list[str] = [
+    "dE_max_w30",
+    "e12_std_w30",
+    "e13_std_w30",
+    "e23_std_w30",
+    "r_min_12_w30",
+    "r_min_13_w30",
+    "r_min_23_w30",
+]
+
+# Lookup: window label → feature list
+_WINDOW_FEATURES: dict[str, list[str]] = {
+    "w5":  W5_FEATURES,
+    "w10": W10_FEATURES,
+    "w15": W15_FEATURES,
+    "w20": W20_FEATURES,
+    "w25": W25_FEATURES,
+    "w30": W30_FEATURES,
+}
 
 # =============================================================================
 # TIER 3: ENGINEERED FEATURES
@@ -152,22 +233,35 @@ _IC_ENGINEERED: list[str] = [
     "tidal_compactness_log", # log tidal forcing scale — outer-body compactness
 ]
 
-# Count: 1
-_W5_ENGINEERED: list[str] = [
-    "close_encounter_strength_w5",
-]
+# Count: 1 per window
+_W5_ENGINEERED:  list[str] = ["close_encounter_strength_w5"]
+_W10_ENGINEERED: list[str] = ["close_encounter_strength_w10"]
+_W15_ENGINEERED: list[str] = ["close_encounter_strength_w15"]
+_W20_ENGINEERED: list[str] = ["close_encounter_strength_w20"]
+_W25_ENGINEERED: list[str] = ["close_encounter_strength_w25"]
+_W30_ENGINEERED: list[str] = ["close_encounter_strength_w30"]
 
-# Count: 1
-_W20_ENGINEERED: list[str] = [
-    "close_encounter_strength_w20",
-]
+# Lookup: window label → engineered feature list
+_WINDOW_ENGINEERED: dict[str, list[str]] = {
+    "w5":  _W5_ENGINEERED,
+    "w10": _W10_ENGINEERED,
+    "w15": _W15_ENGINEERED,
+    "w20": _W20_ENGINEERED,
+    "w25": _W25_ENGINEERED,
+    "w30": _W30_ENGINEERED,
+}
 
 # Convenience aggregates for external use
-IC_ENGINEERED_FEATURES: list[str] = _IC_ENGINEERED
-W5_ENGINEERED_FEATURES: list[str] = _W5_ENGINEERED
-W20_ENGINEERED_FEATURES: list[str] = _W20_ENGINEERED
-ALL_ENGINEERED_FEATURES: list[str] = _IC_ENGINEERED + _W5_ENGINEERED + _W20_ENGINEERED
-DYN_FEATURES: list[str] = W5_FEATURES + W20_FEATURES
+IC_ENGINEERED_FEATURES:  list[str] = _IC_ENGINEERED
+ALL_ENGINEERED_FEATURES: list[str] = (
+    _IC_ENGINEERED
+    + _W5_ENGINEERED + _W10_ENGINEERED + _W15_ENGINEERED
+    + _W20_ENGINEERED + _W25_ENGINEERED + _W30_ENGINEERED
+)
+DYN_FEATURES: list[str] = (
+    W5_FEATURES + W10_FEATURES + W15_FEATURES
+    + W20_FEATURES + W25_FEATURES + W30_FEATURES
+)
 
 
 # =============================================================================
@@ -247,7 +341,7 @@ def _engineer_ic_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _engineer_window_features(df: pd.DataFrame, window: str) -> pd.DataFrame:
     """
-    Compute Tier 3 features for a specific early window.
+    Compute Tier 3 close_encounter_strength for a specific early window.
 
     close_encounter_strength_{window}
         max(e_ij_std) / min(r_min_outer) — eccentricity perturbation
@@ -257,8 +351,13 @@ def _engineer_window_features(df: pd.DataFrame, window: str) -> pd.DataFrame:
         encounter scales as delta_e ~ (m3 / r_min^2) * dt_enc. Dividing
         the observed eccentricity fluctuation by r_min normalizes by
         encounter depth. High values indicate strong chaotic forcing.
+
+        Uses outer-body encounters only (r_min_13, r_min_23) for the
+        denominator — the inner binary separation r_min_12 does not
+        measure the same physical process (third-body tidal injection).
     """
-    assert window in ("w5", "w20"), f"window must be 'w5' or 'w20', got {window!r}"
+    valid_windows = ("w5", "w10", "w15", "w20", "w25", "w30")
+    assert window in valid_windows, f"window must be one of {valid_windows}, got {window!r}"
 
     if f"dE_max_{window}" not in df.columns:
         return df
@@ -289,7 +388,7 @@ def engineer_features(df: pd.DataFrame, windows: list[str]) -> pd.DataFrame:
               Must include m1, m2, m3 (for hill_ratio, tidal_compactness_log)
               even though individual masses are excluded from the output
               matrix via META_COLS but required at compute time.
-    windows : Subset of ["w5", "w20"] to engineer.
+    windows : Subset of ["w5", "w10", "w15", "w20", "w25", "w30"] to engineer.
 
     Returns
     -------
@@ -308,21 +407,36 @@ def engineer_features(df: pd.DataFrame, windows: list[str]) -> pd.DataFrame:
 
 # Feature group counts:
 #
-#   A   IC only                                   10 + 0 + 0 = 10
-#   A+  IC + IC_eng                               10 + 4 + 0 = 14
-#   B   IC + w5                                   17 + 0 + 0 = 17
-#   B+  IC + IC_eng + w5 + w5_eng                 17 + 4 + 1 = 22
-#   C   IC + w20                                  17 + 0 + 0 = 17
-#   C+  IC + IC_eng + w20 + w20_eng               17 + 4 + 1 = 22
-#   D   w5 only                                    7 + 0 + 0 =  7
-#   E   w20 only                                   7 + 0 + 0 =  7
-#   F   IC + IC_eng + w5 + w20 + w20_eng          24 + 4 + 1 = 29
+#   A    IC only                                          10
+#   A+   IC + IC_eng                                     14
 #
-# NOTE: Group F computes to 29 features (10 IC + 4 IC_eng + 7 W5 + 7 W20
-# + 1 W20_eng). IC_eng grew from 2 to 4 with the addition of hierarchy_log
-# and tidal_compactness_log.
+#   B5   IC + w5                                         17
+#   B10  IC + w10                                        17
+#   B15  IC + w15                                        17
+#   B20  IC + w20                                        17
+#   B25  IC + w25                                        17
+#   B30  IC + w30                                        17
+#   B5+  IC + IC_eng + w5  + w5_eng                     22
+#   B10+ IC + IC_eng + w10 + w10_eng                    22
+#   B15+ IC + IC_eng + w15 + w15_eng                    22
+#   B20+ IC + IC_eng + w20 + w20_eng                    22
+#   B25+ IC + IC_eng + w25 + w25_eng                    22
+#   B30+ IC + IC_eng + w30 + w30_eng                    22
+#
+#   C5   w5  only                                         7
+#   C10  w10 only                                         7
+#   C15  w15 only                                         7
+#   C20  w20 only                                         7
+#   C25  w25 only                                         7
+#   C30  w30 only                                         7
+#
+#   D    IC + IC_eng + w5 + w10 + w15 + w20 + w25 + w30
+#         + w30_eng                                       57
+#        (10 IC + 4 IC_eng + 6×7 windows + 1 w30_eng)
 
 _GROUP_SPEC: dict[str, dict] = {
+
+    # ── Baselines ──────────────────────────────────────────────────────────────
     "A": {
         "bases":   [IC_FEATURES],
         "windows": [],
@@ -335,52 +449,136 @@ _GROUP_SPEC: dict[str, dict] = {
         "ic_eng":  True,
         "desc":    "IC + IC-engineered — physics invariants (14 features)",
     },
-    "B": {
+
+    # ── Core: IC + single window, no engineering ───────────────────────────────
+    "B5": {
         "bases":   [IC_FEATURES, W5_FEATURES],
         "windows": [],
         "ic_eng":  False,
-        "desc":    "IC + w5 — window gain, no physics eng. (17 features)",
+        "desc":    "IC + w5 (17 features)",
     },
-    "B+": {
+    "B10": {
+        "bases":   [IC_FEATURES, W10_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w10 (17 features)",
+    },
+    "B15": {
+        "bases":   [IC_FEATURES, W15_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w15 (17 features)",
+    },
+    "B20": {
+        "bases":   [IC_FEATURES, W20_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w20 (17 features)",
+    },
+    "B25": {
+        "bases":   [IC_FEATURES, W25_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w25 (17 features)",
+    },
+    "B30": {
+        "bases":   [IC_FEATURES, W30_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "IC + w30 (17 features)",
+    },
+
+    # ── Core: IC + IC_eng + single window + window_eng ────────────────────────
+    "B5+": {
         "bases":   [IC_FEATURES, W5_FEATURES],
         "windows": ["w5"],
         "ic_eng":  True,
-        "desc":    "IC + IC-eng + w5 + w5-eng — full 5% model (22 features)",
+        "desc":    "IC + IC_eng + w5 + w5_eng (22 features)",
     },
-    "C": {
-        "bases":   [IC_FEATURES, W20_FEATURES],
-        "windows": [],
-        "ic_eng":  False,
-        "desc":    "IC + w20 — window gain, no physics eng. (17 features)",
+    "B10+": {
+        "bases":   [IC_FEATURES, W10_FEATURES],
+        "windows": ["w10"],
+        "ic_eng":  True,
+        "desc":    "IC + IC_eng + w10 + w10_eng (22 features)",
     },
-    "C+": {
+    "B15+": {
+        "bases":   [IC_FEATURES, W15_FEATURES],
+        "windows": ["w15"],
+        "ic_eng":  True,
+        "desc":    "IC + IC_eng + w15 + w15_eng (22 features)",
+    },
+    "B20+": {
         "bases":   [IC_FEATURES, W20_FEATURES],
         "windows": ["w20"],
         "ic_eng":  True,
-        "desc":    "IC + IC-eng + w20 + w20-eng — full 20% model (22 features)",
+        "desc":    "IC + IC_eng + w20 + w20_eng (22 features)",
     },
-    "D": {
+    "B25+": {
+        "bases":   [IC_FEATURES, W25_FEATURES],
+        "windows": ["w25"],
+        "ic_eng":  True,
+        "desc":    "IC + IC_eng + w25 + w25_eng (22 features)",
+    },
+    "B30+": {
+        "bases":   [IC_FEATURES, W30_FEATURES],
+        "windows": ["w30"],
+        "ic_eng":  True,
+        "desc":    "IC + IC_eng + w30 + w30_eng (22 features)",
+    },
+
+    # ── Window-only ────────────────────────────────────────────────────────────
+    "C5": {
         "bases":   [W5_FEATURES],
         "windows": [],
         "ic_eng":  False,
-        "desc":    "w5 dynamics only — pure dynamics test (7 features)",
+        "desc":    "w5 dynamics only (7 features)",
     },
-    "E": {
+    "C10": {
+        "bases":   [W10_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "w10 dynamics only (7 features)",
+    },
+    "C15": {
+        "bases":   [W15_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "w15 dynamics only (7 features)",
+    },
+    "C20": {
         "bases":   [W20_FEATURES],
         "windows": [],
         "ic_eng":  False,
-        "desc":    "w20 dynamics only — pure dynamics test (7 features)",
+        "desc":    "w20 dynamics only (7 features)",
     },
-    "F": {
-        "bases":   [IC_FEATURES, W5_FEATURES, W20_FEATURES],
-        "windows": ["w20"],
+    "C25": {
+        "bases":   [W25_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "w25 dynamics only (7 features)",
+    },
+    "C30": {
+        "bases":   [W30_FEATURES],
+        "windows": [],
+        "ic_eng":  False,
+        "desc":    "w30 dynamics only (7 features)",
+    },
+
+    # ── Upper bound ────────────────────────────────────────────────────────────
+    "D": {
+        "bases":   [
+            IC_FEATURES,
+            W5_FEATURES, W10_FEATURES, W15_FEATURES,
+            W20_FEATURES, W25_FEATURES, W30_FEATURES,
+        ],
+        "windows": ["w30"],   # only w30_eng included; IC_eng via ic_eng=True
         "ic_eng":  True,
-        "desc":    "IC + IC-eng + w5 + w20 + w20-eng — full model (29 features)",
+        "desc":    "IC + IC_eng + w5–w30 + w30_eng — upper bound (57 features)",
     },
 }
 
 
-def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFrame:
+def get_feature_matrix(df: pd.DataFrame, feature_group: str = "D") -> pd.DataFrame:
     """
     Construct a leakage-safe, window-consistent feature matrix.
 
@@ -390,7 +588,7 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
                     and tidal_compactness_log can be computed for groups with
                     ic_eng=True (individual masses are excluded from the output
                     matrix via META_COLS but required at compute time).
-    feature_group : One of A–F.
+    feature_group : One of A, A+, B5–B30, B5+–B30+, C5–C30, D.
 
     Returns
     -------
@@ -399,7 +597,8 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
     Notes
     -----
     - v3_angle is always excluded (wrap discontinuity; not encoded).
-    - Engineered features are present in groups A+, B+, C+, and F.
+    - dL_max_{wN} are always excluded (unreliable under discrete sampling).
+    - Engineered features are present in groups A+, B5+–B30+, and D.
     - Missing columns trigger a UserWarning and are skipped gracefully.
     """
     feature_group = feature_group.upper()
@@ -415,7 +614,7 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
     for feat_list in spec["bases"]:
         base_cols.extend(feat_list)
 
-    windows = spec["windows"]
+    windows    = spec["windows"]
     has_engineering = spec["ic_eng"] or len(windows) > 0
 
     df_work = df.copy()
@@ -427,16 +626,20 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
         if spec["ic_eng"]:
             eng_cols.extend(_IC_ENGINEERED)
         for w in windows:
-            eng_cols.extend(_W5_ENGINEERED if w == "w5" else _W20_ENGINEERED)
+            eng_cols.extend(_WINDOW_ENGINEERED[w])
     else:
         eng_cols = []
 
     desired_cols = base_cols + eng_cols
 
-    exclude = set(LABEL_COLS + META_COLS + LEAKY_COLS + ["v3_angle"])
+    exclude = set(
+        LABEL_COLS + META_COLS + LEAKY_COLS
+        + _DL_MAX_COLS
+        + ["v3_angle"]
+    )
 
     available: list[str] = []
-    missing: list[str] = []
+    missing:   list[str] = []
     for c in desired_cols:
         if c in exclude:
             continue
@@ -454,7 +657,7 @@ def get_feature_matrix(df: pd.DataFrame, feature_group: str = "C") -> pd.DataFra
             stacklevel=2,
         )
 
-    seen: set[str] = set()
+    seen:       set[str]  = set()
     final_cols: list[str] = []
     for c in available:
         if c not in seen:
@@ -469,12 +672,11 @@ def describe_feature_groups() -> None:
     print("\n── Feature Group Definitions ──────────────────────────────────")
     for grp, spec in _GROUP_SPEC.items():
         n_base = sum(len(fl) for fl in spec["bases"])
-        n_eng = (len(_IC_ENGINEERED) if spec["ic_eng"] else 0) + sum(
-            len(_W5_ENGINEERED if w == "w5" else _W20_ENGINEERED)
-            for w in spec["windows"]
+        n_eng  = (len(_IC_ENGINEERED) if spec["ic_eng"] else 0) + sum(
+            len(_WINDOW_ENGINEERED[w]) for w in spec["windows"]
         )
-        print(f"  {grp}  {spec['desc']}")
-        print(f"     raw={n_base}  engineered={n_eng}  total={n_base + n_eng}")
+        print(f"  {grp:<5}  {spec['desc']}")
+        print(f"         raw={n_base}  engineered={n_eng}  total={n_base + n_eng}")
     print("─" * 63)
 
 
@@ -491,7 +693,6 @@ def get_labels(df: pd.DataFrame) -> pd.Series:
     return df["outcome_class"].astype(int)
 
 
-# features.py
 def get_feature_group_names() -> list[str]:
     """Return all registered feature group identifiers."""
     return list(_GROUP_SPEC.keys())
@@ -502,9 +703,9 @@ def get_feature_group_names() -> list[str]:
 # =============================================================================
 
 def describe_features(
-    df: pd.DataFrame,
-    feature_group: str = "F",
-    verbose: bool = True,
+    df:            pd.DataFrame,
+    feature_group: str  = "D",
+    verbose:       bool = True,
 ) -> pd.DataFrame:
     """
     Generate a structured feature audit for a given feature group.
@@ -512,7 +713,7 @@ def describe_features(
     Parameters
     ----------
     df            : Raw dataset.
-    feature_group : Feature configuration (A–F).
+    feature_group : Feature configuration.
     verbose       : Print formatted summary.
 
     Returns
@@ -524,16 +725,14 @@ def describe_features(
     tier_map: dict[str, str] = {}
     for feat in IC_FEATURES:
         tier_map[feat] = "IC"
-    for feat in W5_FEATURES:
-        tier_map[feat] = "W5"
-    for feat in W20_FEATURES:
-        tier_map[feat] = "W20"
+    for window, feats in _WINDOW_FEATURES.items():
+        for feat in feats:
+            tier_map[feat] = window.upper()
     for feat in _IC_ENGINEERED:
         tier_map[feat] = "ENG-IC"
-    for feat in _W5_ENGINEERED:
-        tier_map[feat] = "ENG-W5"
-    for feat in _W20_ENGINEERED:
-        tier_map[feat] = "ENG-W20"
+    for window, feats in _WINDOW_ENGINEERED.items():
+        for feat in feats:
+            tier_map[feat] = f"ENG-{window.upper()}"
 
     rows = []
     for col in feat_df.columns:
@@ -557,7 +756,7 @@ def describe_features(
 
         tier_counts = summary["tier"].value_counts()
         for tier, cnt in tier_counts.items():
-            print(f"  {tier:<10}: {cnt} features")
+            print(f"  {tier:<12}: {cnt} features")
 
         bad = summary[summary["missing_%"] > 20]
         if len(bad) > 0:
@@ -573,4 +772,66 @@ def describe_features(
 
         print("─" * 55)
 
-    return summary 
+    return summary
+
+
+# =============================================================================
+# GROUP D VERIFICATION  (Item 1 — attestation)
+# =============================================================================
+
+def verify_group_d_count(df: pd.DataFrame, verbose: bool = True) -> int:
+    """
+    Verify that feature group D resolves to exactly 57 features on a given
+    DataFrame. Raises AssertionError if the count is wrong.
+
+    This is an attestation utility for Item 1 of the ML Engineer Action List.
+    It must be called against a DataFrame that contains all expected columns
+    (e.g. the synthetic dataset from run_baseline._make_synthetic_dataset, or
+    the real metadata CSV). Do NOT call this at import time.
+
+    Expected composition
+    --------------------
+    10  IC features      (epsilon_total … v3_frac)
+     4  IC_eng features  (hill_ratio, energy_partition, hierarchy_log,
+                          tidal_compactness_log)
+    42  window features  (7 per window × 6 windows: w5–w30)
+     1  w30_eng feature  (close_encounter_strength_w30)
+    ── = 57
+
+    Parameters
+    ----------
+    df      : DataFrame with all IC + window columns present.
+    verbose : Print the per-tier breakdown when True.
+
+    Returns
+    -------
+    n_features : int — confirmed feature count (57).
+    """
+    feat_df = get_feature_matrix(df, feature_group="D")
+    n = len(feat_df.columns)
+
+    if verbose:
+        print("\n── Group D Feature Count Verification ──────────────────────")
+        print(f"  Features returned by get_feature_matrix(df, 'D'): {n}")
+        print(f"  Expected breakdown:")
+        print(f"    IC features   : {len(IC_FEATURES)}")
+        print(f"    IC_eng        : {len(_IC_ENGINEERED)}")
+        print(f"    Window (6×7)  : {6 * 7}")
+        print(f"    w30_eng       : {len(_W30_ENGINEERED)}")
+        print(f"    Total         : {len(IC_FEATURES) + len(_IC_ENGINEERED) + 6*7 + len(_W30_ENGINEERED)}")
+        print(f"  Actual columns  : {n}")
+        if n == 57:
+            print("  ✓  Group D confirmed: 57 features")
+        else:
+            print(f"  ✗  MISMATCH — check for missing columns in input DataFrame")
+            print(f"     Columns present: {list(feat_df.columns)}")
+        print("─" * 55)
+
+    assert n == 57, (
+        f"Group D feature count mismatch: expected 57, got {n}. "
+        f"Ensure all IC, window (w5–w30), and engineered columns are present "
+        f"in the input DataFrame. Missing columns are silently skipped by "
+        f"get_feature_matrix — check for absent window columns in your CSV."
+    )
+
+    return n

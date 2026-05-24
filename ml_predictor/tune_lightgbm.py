@@ -19,32 +19,25 @@ Recommended usage
   # From project root (feature group must be specified explicitly):
   python -m ml_predictor.tune_lightgbm \\
       --data data/dataset3/metadata3.csv \\
-      --feature-group C+ \\
+      --feature-group B20+ \\
       --n-trials 100
-
-  # Smoke test (no real data):
-  python -m ml_predictor.tune_lightgbm \\
-      --smoke-test \\
-      --feature-group C+ \\
-      --n-trials 10
 
 Hyperparameter search space (physically motivated)
 --------------------------------------------------
   num_leaves       : Controls model complexity. LightGBM grows leaf-wise;
-                     too many leaves -> overfits on chaotic class (minority).
-                     Range 16-128 covers shallow (interpretable) to deep.
+                     too many leaves → overfits on chaotic class (minority).
+                     Range 16–128 covers shallow (interpretable) to deep.
   max_depth        : Hard depth cap to prevent individual leaves from
                      memorising rare close-encounter configurations.
   min_child_samples: Minimum samples per leaf. Critical for minority class
                      (chaotic in hierarchical regime, unstable in compact).
-                     Higher values -> more conservative splits.
+                     Higher values → more conservative splits.
   learning_rate    : Log-uniform. Boosting dynamics are log-scale; small
                      rates with early stopping consistently outperform large.
   subsample        : Row subsampling per tree. Decorrelates trees on
                      regime-structured data (regime co-varies with class).
-                     Requires subsample_freq > 0 to take effect in LightGBM.
   colsample_bytree : Feature subsampling. Important when IC features
-                     (q12/q13/q23) are correlated -- forces trees to find
+                     (q12/q13/q23) are correlated — forces trees to find
                      alternative split paths.
   reg_alpha        : L1 regularisation. Can zero out redundant mass ratios
                      (q12/q13/q23 are collinear by construction).
@@ -83,28 +76,6 @@ from ml_predictor.trainer    import (
 )
 from ml_predictor.evaluator  import evaluate, save_results_csv
 from ml_predictor.visualiser import plot_all
-from ml_predictor.run_baseline import _make_synthetic_dataset
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIXED STRUCTURAL PARAMS (shared between objective and final training)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Centralised here so the Optuna objective and train_lgbm_tuned_cv are
-# guaranteed to evaluate the same model family. Previously these were
-# duplicated with a key omission (subsample_freq) in the objective, meaning
-# the searched model differed from the finally trained model.
-
-_LGBM_FIXED_PARAMS: dict = {
-    "objective":      "multiclass",
-    "num_class":      N_CLASSES,
-    "metric":         "multi_logloss",
-    "n_estimators":   500,
-    "subsample_freq": 1,   # REQUIRED: activates row subsampling (subsample param)
-    "random_state":   42,
-    "verbose":       -1,
-    "n_jobs":        -1,
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,16 +93,10 @@ def _optuna_objective_lgbm(
 
     Uses MedianPruner via trial.report / trial.should_prune on per-fold
     intermediate F1 values. Pruning fires after the 2nd fold if the running
-    mean is below the median of completed trials -- saves ~30-40% of compute
+    mean is below the median of completed trials — saves ~30–40% of compute
     on a 100-trial search.
 
-    The CV loop is fully self-contained -- no MODEL_REGISTRY involvement.
-
-    Fix notes vs original:
-      - subsample_freq=1 now included via _LGBM_FIXED_PARAMS so subsample
-        actually takes effect during search (was silently disabled before).
-      - predict_proba + argmax used for F1 computation, consistent with
-        train_lgbm_tuned_cv (was using model.predict directly).
+    The CV loop is fully self-contained — no MODEL_REGISTRY involvement.
     """
     trial_params = {
         "num_leaves":        trial.suggest_int  ("num_leaves",        16,   128           ),
@@ -145,14 +110,22 @@ def _optuna_objective_lgbm(
         "min_split_gain":    trial.suggest_float("min_split_gain",    0.0,  1.0           ),
     }
 
-    # Merge tunable params with fixed structural params -- single source of
-    # truth ensures objective and final training evaluate identical model family.
-    params = {**_LGBM_FIXED_PARAMS, **trial_params}
+    # Fixed structural params — not tunable
+    params = {
+        **trial_params,
+        "objective":      "multiclass",
+        "num_class":      N_CLASSES,
+        "metric":         "multi_logloss",
+        "n_estimators":   500,
+        "subsample_freq": 1,   # required for subsample to take effect
+        "random_state":   42,
+        "verbose":       -1,
+        "n_jobs":        -1,
+    }
 
     X     = get_feature_matrix(df, feature_group=feature_group)
     y     = get_labels(df).values
     X_arr = X.values.astype(np.float32)
-    feature_names = list(X.columns)
 
     min_count   = np.bincount(y)[np.bincount(y) > 0].min()
     safe_splits = max(2, min(n_folds, min_count))
@@ -176,13 +149,7 @@ def _optuna_objective_lgbm(
             ],
         )
 
-        # FIX: use predict_proba + argmax, consistent with train_lgbm_tuned_cv.
-        # model.predict() was used before -- diverges from the final evaluation
-        # prediction path and bypasses the named-feature DataFrame interface.
-        X_va_df = pd.DataFrame(X_va, columns=feature_names)
-        proba   = model.predict_proba(X_va_df).astype(np.float32)
-        pred    = np.argmax(proba, axis=1)
-
+        pred  = model.predict(X_va)
         score = f1_score(y_va, pred, average="macro", zero_division=0)
         scores.append(score)
 
@@ -207,14 +174,15 @@ def tune_lightgbm_optuna(
     """
     Bayesian hyperparameter search for LightGBM via Optuna.
 
-    Uses MedianPruner -- prunes a trial if its intermediate F1 after fold k
+    Uses MedianPruner — prunes a trial if its intermediate F1 after fold k
     is below the median of all completed trials at step k. This is safe here
     because the fold ordering is deterministic (same random_state=42 split).
 
     Parameters
     ----------
     df            : Full dataset DataFrame.
-    feature_group : Feature configuration to tune on.
+    feature_group : Feature configuration to tune on. Any of the 21 registered
+                    groups (A, A+, B5–B30, B5+–B30+, C5–C30, D).
     n_trials      : Optuna trials. 100 is sufficient for 9-param search;
                     diminishing returns beyond ~150.
     n_folds       : CV folds inside each trial.
@@ -251,13 +219,22 @@ def tune_lightgbm_optuna(
         show_progress_bar = False,
     )
 
-    # Merge best tunable params with fixed structural params.
-    # _LGBM_FIXED_PARAMS is the single source of truth -- no duplication.
-    best_params = {**_LGBM_FIXED_PARAMS, **study.best_params}
+    best_params = {
+        **study.best_params,
+        # Fixed structural params
+        "objective":      "multiclass",
+        "num_class":      N_CLASSES,
+        "metric":         "multi_logloss",
+        "n_estimators":   500,
+        "subsample_freq": 1,
+        "random_state":   42,
+        "verbose":       -1,
+        "n_jobs":        -1,
+    }
 
     n_pruned   = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
     n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-    print(f"\n  [Optuna] Search complete -- best macro F1: {study.best_value:.4f}")
+    print(f"\n  [Optuna] Search complete — best macro F1: {study.best_value:.4f}")
     print(f"  Trials: {n_complete} complete, {n_pruned} pruned")
     print(f"  Best params: " +
           ", ".join(
@@ -282,7 +259,7 @@ def train_lgbm_tuned_cv(
     """
     Train LightGBM with Optuna-tuned hyperparameters via stratified CV.
 
-    Intentionally separate from train_model_cv -- accepts an explicit params
+    Intentionally separate from train_model_cv — accepts an explicit params
     dict, never reads from MODEL_REGISTRY. The tuned result is a clean
     additional data point, not a replacement of the baseline.
 
@@ -290,7 +267,7 @@ def train_lgbm_tuned_cv(
     ----------
     df            : Full dataset DataFrame.
     best_params   : Complete LightGBM param dict from tune_lightgbm_optuna().
-    feature_group : Should match what was tuned on.
+    feature_group : Should match the group tuned on.
     n_folds       : CV folds.
     verbose       : Print per-fold summary line.
 
@@ -349,7 +326,7 @@ def train_lgbm_tuned_cv(
 
         results.fold_macro_f1.append(macro_f1)
         results.fold_balanced_acc.append(bal_acc)
-        results.fold_brier.append(brier)   # FIX: was missing -- caused fold_brier=[] -> mean_brier=nan in CSV
+        results.fold_brier.append(brier)
         results.fold_cms.append(cm)
         results.models.append(model)
 
@@ -365,7 +342,7 @@ def train_lgbm_tuned_cv(
     results.oof_regime = regimes
 
     if verbose:
-        print(f"  OOF Macro F1 : {results.mean_macro_f1:.4f} +/- {results.std_macro_f1:.4f}")
+        print(f"  OOF Macro F1 : {results.mean_macro_f1:.4f} ± {results.std_macro_f1:.4f}")
         print(f"  OOF Bal. Acc : {np.mean(results.fold_balanced_acc):.4f}")
         print(f"  OOF Brier    : {np.mean(results.fold_brier):.4f}")
 
@@ -377,19 +354,18 @@ def train_lgbm_tuned_cv(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_lightgbm_tuning(
-    data_path:     Path | None,
+    data_path:     Path,
     feature_group: str,
     output_dir:    Path = Path("results/baseline"),
     n_trials:      int  = 100,
     n_folds:       int  = 5,
-    smoke_test:    bool = False,
     save_plots:    bool = True,
     verbose:       bool = True,
 ) -> dict:
     """
     Full LightGBM tuning pipeline.
 
-      1. Load data (or generate synthetic for smoke test)
+      1. Load data from CSV
       2. Run Optuna search (n_trials, with MedianPruner)
       3. Train final model with best params (full CV)
       4. Evaluate and save lightgbm_tuned_{feature_group}.csv
@@ -398,13 +374,13 @@ def run_lightgbm_tuning(
 
     Parameters
     ----------
-    data_path     : Path to metadata CSV. Required unless smoke_test=True.
-    feature_group : Feature configuration to tune on. Must be specified.
+    data_path     : Path to metadata CSV. Required.
+    feature_group : Feature configuration to tune on. Any of the 21 registered
+                    groups (A, A+, B5–B30, B5+–B30+, C5–C30, D).
     output_dir    : Root results directory. Tuned outputs go to
                     {output_dir}/tuned/lightgbm_tuned_{feature_group}.csv.
     n_trials      : Optuna trials.
     n_folds       : CV folds.
-    smoke_test    : Use synthetic data.
     save_plots    : Save confusion matrix, calibration, importance plots.
     verbose       : Print per-fold progress.
 
@@ -417,13 +393,7 @@ def run_lightgbm_tuning(
     tuned_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    if smoke_test:
-        print("── SMOKE TEST MODE ──")
-        df = _make_synthetic_dataset(n=600)
-    elif data_path is not None:
-        df = pd.read_csv(data_path)
-    else:
-        raise ValueError("Provide --data <path> or use --smoke-test")
+    df = pd.read_csv(data_path)
 
     print(f"Dataset: {len(df)} samples | Feature group: {feature_group}")
     label_counts = df["outcome_class"].value_counts().sort_index()
@@ -466,18 +436,14 @@ def run_lightgbm_tuning(
 
     src  = tuned_dir / "all_results.csv"
     dest = tuned_dir / f"lightgbm_tuned_{feature_group}.csv"
-
-    # FIX: use Path.replace() instead of Path.rename().
-    # rename() raises FileExistsError on Windows if dest exists (re-runs fail).
-    # replace() is atomic on POSIX and overwrites safely on all platforms.
     if src.exists():
-        src.replace(dest)
-        print(f"  Renamed -> {dest}")
+        src.rename(dest)
+        print(f"  Renamed → {dest}")
 
     # ── Save Optuna trial history ─────────────────────────────────────────────
     trials_path = tuned_dir / f"optuna_trials_{feature_group}.csv"
     study.trials_dataframe().to_csv(trials_path, index=False)
-    print(f"  Saved trial history -> {trials_path}")
+    print(f"  Saved trial history → {trials_path}")
 
     # ── Optional plots ────────────────────────────────────────────────────────
     if save_plots:
@@ -501,19 +467,18 @@ def _parse_args():
     p = argparse.ArgumentParser(
         description="LightGBM Optuna tuning for three-body instability"
     )
-    p.add_argument("--data",          type=Path, default=None,
-                   help="Path to metadata CSV")
+    p.add_argument("--data",          type=Path, required=True,
+                   help="Path to metadata CSV (required)")
     p.add_argument("--output",        type=Path, default=Path("results/baseline"),
                    help="Root output directory (tuned CSV written to "
                         "{output}/tuned/lightgbm_tuned_{feature_group}.csv)")
     p.add_argument("--feature-group", type=str,  required=True,
-                   help="Feature group to tune on (e.g. C+, F). Required.")
+                   help="Feature group to tune on. Any of: A, A+, "
+                        "B5–B30, B5+–B30+, C5–C30, D. Required.")
     p.add_argument("--n-trials",      type=int,  default=100,
                    help="Number of Optuna trials (default: 100)")
     p.add_argument("--folds",         type=int,  default=5,
                    help="CV folds (default: 5)")
-    p.add_argument("--smoke-test",    action="store_true",
-                   help="Use synthetic data (no real dataset needed)")
     p.add_argument("--no-plots",      action="store_true",
                    help="Skip plot generation")
     return p.parse_args()
@@ -527,6 +492,5 @@ if __name__ == "__main__":
         output_dir    = args.output,
         n_trials      = args.n_trials,
         n_folds       = args.folds,
-        smoke_test    = args.smoke_test,
         save_plots    = not args.no_plots,
     )
